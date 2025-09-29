@@ -11,7 +11,11 @@ bsky.app is the largest `AppView` that renders bsky.social data with a preferenc
 
 You can host your data on bsky.social by signup an account there
 
-Or you can also to host your data elsewhere, like on a `git` service like github/gitlab, and the missing piece is:
+You can also to host them elsewhere, in this case in a `git` repo on github/gitlab   
+
+Both atproto and git are basically Merkle Search Tree anyway
+
+Since .git is static, then the missing piece is
 
  - how to publish to atproto/bsky network
  - receive interactions (likes, comments, reposts, etc)
