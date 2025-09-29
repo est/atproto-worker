@@ -11,9 +11,11 @@ bsky.app is the largest `AppView` that renders bsky.social data with a preferenc
 
 You can host your data on bsky.social by signup an account there
 
-You can also to host them elsewhere, in this case in a `git` repo on github/gitlab   
+The official [self-host](https://atproto.com/guides/self-hosting) is quite lengthy and heavyweight, like setup a Wordpress blog with LAMP
 
-Both atproto and git are basically Merkle Search Tree anyway
+Why not save your own data in a `git` repo, like a static generated site, like Github Pages?   
+
+Coincidentally, both atproto and git are basically Merkle Search Tree anyway.
 
 Since .git is static, then the missing piece is
 
@@ -36,3 +38,7 @@ flowchart LR
     W --> |git comimt| G
     A <--> |interactions| E(Audience)
 ```
+
+## ToDo
+
+- [ ] the actual code
