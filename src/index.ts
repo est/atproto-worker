@@ -8,6 +8,7 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 import { ExecutionContext } from '@cloudflare/workers-types';
+import {} from '@atproto/common-web';
 
 export interface Env {
 	// Bindings for secrets, KV, etc. will be defined here
