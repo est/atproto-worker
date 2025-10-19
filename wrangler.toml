@@ -1,3 +1,10 @@
 name = "atproto-worker"
 main = "src/index.ts"
 compatibility_date = "2024-04-05"
+
+[triggers]
+crons = ["*/1 * * * *"] # Every minute
+
+[[kv_namespaces]]
+binding = "ATPROTO_KV"
+id = "your-kv-namespace-id" # You will need to create this in the Cloudflare dashboard
