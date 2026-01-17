@@ -1,10 +1,35 @@
 name = "atproto-worker"
-main = "src/index.ts"
+main = "src/index.js"
 compatibility_date = "2024-04-05"
 
+# Every 5 minutes - sync interactions from Bluesky
 [triggers]
-crons = ["*/1 * * * *"] # Every minute
+crons = ["*/5 * * * *"]
 
-[[kv_namespaces]]
-binding = "ATPROTO_KV"
-id = "your-kv-namespace-id" # You will need to create this in the Cloudflare dashboard
+# D1 Database for records, sequences, and interactions
+[[d1_databases]]
+binding = "DB"
+database_name = "atproto-pds"
+database_id = "your-d1-database-id"  # Replace after `npx wrangler d1 create atproto-pds`
+
+# Durable Object for WebSocket subscriptions (firehose)
+[[durable_objects.bindings]]
+name = "FIREHOSE"
+class_name = "Firehose"
+
+# Durable Object migrations
+[[migrations]]
+tag = "v1"
+new_classes = ["Firehose"]
+
+# Environment variables
+[vars]
+# Your DID - use did:web:yourdomain.com or did:plc:xxx
+OWNER_DID = ""
+# Your handle - e.g., yourname.bsky.social or handle.yourdomain.com
+OWNER_HANDLE = ""
+
+# Development overrides
+[env.dev.vars]
+OWNER_DID = "did:web:localhost:8787"
+OWNER_HANDLE = "localhost"

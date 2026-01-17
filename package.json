@@ -1,19 +1,16 @@
 {
   "name": "atproto-worker",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy",
     "dev": "wrangler dev",
-    "start": "wrangler dev"
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create atproto-pds",
+    "db:init": "wrangler d1 execute atproto-pds --file=schema.sql",
+    "db:init:local": "wrangler d1 execute atproto-pds --local --file=schema.sql"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20240403.0",
-    "typescript": "^5.0.4",
     "wrangler": "^3.47.0"
-  },
-  "dependencies": {
-    "@atproto/common-web": "^0.4.3",
-    "cbor-x": "^1.6.0"
   }
 }
