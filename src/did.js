@@ -15,14 +15,15 @@ export function handleAtprotoDid(did) {
  * Generate a did:web document for the host
  * @param {string} host - The hostname (e.g., "pds.example.com")
  * @param {string} handle - The handle (e.g., "alice.example.com") 
+ * @param {string} publicKeyMultibase - The public key multibase string
  */
-export function generateDidWebDocument(host, handle) {
+export function generateDidWebDocument(host, handle, publicKeyMultibase) {
     const did = `did:web:${host}`
 
     return {
         '@context': [
             'https://www.w3.org/ns/did/v1',
-            'https://w3id.org/security/multikey/v1',
+            'https://w3id.org/security/multikey/multikey-v1.jsonld',
             'https://w3id.org/security/suites/secp256k1-2019/v1'
         ],
         id: did,
@@ -32,8 +33,7 @@ export function generateDidWebDocument(host, handle) {
                 id: `${did}#atproto`,
                 type: 'Multikey',
                 controller: did,
-                // Placeholder - in production, this would be a real public key
-                publicKeyMultibase: 'zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF'
+                publicKeyMultibase: publicKeyMultibase || 'zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF'
             }
         ],
         service: [
@@ -49,8 +49,8 @@ export function generateDidWebDocument(host, handle) {
 /**
  * Handle /.well-known/did.json for did:web
  */
-export function handleDidJson(host, handle) {
-    const doc = generateDidWebDocument(host, handle)
+export function handleDidJson(host, handle, publicKeyMultibase) {
+    const doc = generateDidWebDocument(host, handle, publicKeyMultibase)
     return new Response(JSON.stringify(doc, null, 2), {
         headers: { 'Content-Type': 'application/did+ld+json' }
     })

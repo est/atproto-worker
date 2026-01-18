@@ -59,7 +59,7 @@ export default {
                 response = handleAtprotoDid(did)
             }
             else if (path === '/.well-known/did.json') {
-                response = handleDidJson(url.host, handle)
+                response = handleDidJson(url.host, handle, env.OWNER_PUBLIC_KEY)
             }
             // XRPC API
             else if (path.startsWith('/xrpc/')) {
