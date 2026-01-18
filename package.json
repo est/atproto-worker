@@ -1,16 +1,19 @@
 {
   "name": "atproto-worker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "dev:local": "JOURNAL_CONTENT=$(cat journal.ndjson 2>/dev/null) wrangler dev",
     "deploy": "wrangler deploy",
-    "db:create": "wrangler d1 create atproto-pds",
-    "db:init": "wrangler d1 execute atproto-pds --file=schema.sql",
-    "db:init:local": "wrangler d1 execute atproto-pds --local --file=schema.sql"
+    "seal": "node cli/seal.js",
+    "seal:init": "node cli/seal.js init",
+    "seal:post": "node cli/seal.js post",
+    "test": "node tests/crypto.test.js && node tests/journal.test.js"
   },
   "devDependencies": {
+    "@noble/secp256k1": "^2.1.0",
     "wrangler": "^3.47.0"
   }
 }

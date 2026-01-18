@@ -1,17 +1,12 @@
 /**
  * AT Protocol Personal Data Server - Cloudflare Worker
+ * Event-Sourced Static Publisher
  * 
- * A minimal PDS implementation for self-hosting your AT Protocol identity.
- * 
- * Features:
- * - Personal posts stored in D1 database
- * - WebSocket firehose (subscribeRepos) via Durable Object
- * - Periodic interaction syncing from Bluesky
- * - Custom domain support for maximum independence
+ * Uses an append-only journal as single source of truth.
+ * No database, no mutable state, stateless worker.
  */
 
-import { Database } from './db.js'
-import { Repo } from './repo.js'
+import { Journal } from './journal.js'
 import { handleXrpc } from './xrpc.js'
 import { handleAtprotoDid, handleDidJson } from './did.js'
 import { syncInteractions, syncFollowers } from './interactions.js'
@@ -27,57 +22,74 @@ export default {
         const url = new URL(request.url)
         const path = url.pathname
 
-        // CORS headers for API access
+        // CORS headers
         const corsHeaders = {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
             'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         }
 
-        // Handle CORS preflight
         if (request.method === 'OPTIONS') {
             return new Response(null, { headers: corsHeaders })
         }
 
-        // Initialize database and repo
-        const db = new Database(env.DB)
+        // Initialize journal
+        const journal = new Journal(env)
+        await journal.load()
+
         const did = env.OWNER_DID || `did:web:${url.host}`
         const handle = env.OWNER_HANDLE || url.host
-        const repo = new Repo(db, did)
 
         try {
             let response
 
-            // Route requests
-            if (path === '/.well-known/atproto-did') {
-                // Handle verification for handle
+            // Refresh endpoint - sync journal from HTTP source
+            if (path === '/refresh') {
+                const result = await journal.refresh()
+                response = new Response(JSON.stringify({
+                    ok: true,
+                    message: 'Journal refreshed',
+                    ...result
+                }), {
+                    headers: { 'Content-Type': 'application/json' }
+                })
+            }
+            // Well-known endpoints
+            else if (path === '/.well-known/atproto-did') {
                 response = handleAtprotoDid(did)
-            } else if (path === '/.well-known/did.json') {
-                // Handle did:web resolution
+            }
+            else if (path === '/.well-known/did.json') {
                 response = handleDidJson(url.host, handle)
-            } else if (path.startsWith('/xrpc/')) {
-                // Handle XRPC API calls
-                response = await handleXrpc(request, { repo, db, did, handle, env })
-            } else if (path === '/') {
-                // Root - simple info page
+            }
+            // XRPC API
+            else if (path.startsWith('/xrpc/')) {
+                response = await handleXrpc(request, { journal, did, handle, env })
+            }
+            // Root info
+            else if (path === '/') {
                 response = new Response(JSON.stringify({
                     name: 'atproto-worker',
-                    description: 'Personal AT Protocol Data Server',
+                    description: 'Event-Sourced AT Protocol Publisher',
                     did,
                     handle,
+                    journal: {
+                        events: journal.events.length,
+                        currentSeq: journal.getCurrentSeq()
+                    },
                     endpoints: {
                         xrpc: '/xrpc/',
-                        atprotoDid: '/.well-known/atproto-did',
-                        didJson: '/.well-known/did.json'
+                        refresh: '/refresh',
+                        atprotoDid: '/.well-known/atproto-did'
                     }
                 }, null, 2), {
                     headers: { 'Content-Type': 'application/json' }
                 })
-            } else {
+            }
+            else {
                 response = new Response('Not Found', { status: 404 })
             }
 
-            // Add CORS headers to response
+            // Add CORS
             const newHeaders = new Headers(response.headers)
             for (const [key, value] of Object.entries(corsHeaders)) {
                 newHeaders.set(key, value)
@@ -101,23 +113,27 @@ export default {
     },
 
     /**
-     * Handle scheduled cron triggers
-     * Used for syncing interactions from Bluesky
+     * Scheduled cron - sync interactions from Bluesky
      */
     async scheduled(controller, env, ctx) {
-        console.log('Running scheduled sync...')
+        const journal = new Journal(env)
+        await journal.load()
 
-        const db = new Database(env.DB)
         const did = env.OWNER_DID
         const handle = env.OWNER_HANDLE
 
-        if (!did) {
-            console.log('OWNER_DID not configured, skipping sync')
-            return
+        if (!did) return
+
+        // Optionally refresh journal on cron
+        if (env.JOURNAL_URL) {
+            try {
+                await journal.refresh()
+            } catch (e) {
+                console.error('Journal refresh failed:', e)
+            }
         }
 
-        // Sync interactions from Bluesky
-        ctx.waitUntil(syncInteractions(db, did, handle))
-        ctx.waitUntil(syncFollowers(db, did))
+        // Sync interactions (these go to separate KV, not journal)
+        ctx.waitUntil(syncInteractions(journal, did, handle))
     }
 }

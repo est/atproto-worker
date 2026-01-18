@@ -1,0 +1,7 @@
+{
+  "did": "did:web:example.com",
+  "handle": "example.com",
+  "privateKey": "468177ab8840c0816b110adb676a7eeba987a33786fd7a58748c9a3893fbc094",
+  "publicKey": "02774b47f2b3f1391b85ba6e58e31e340d3388c2712e9ccf0ee5a3307738a9c307",
+  "publicKeyMultibase": "zQ3shVSTrMDQM8fiEye39c9Ntnn9zhKU2PmnhxKqn9pVwg16n"
+}

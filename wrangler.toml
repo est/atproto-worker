@@ -2,34 +2,34 @@ name = "atproto-worker"
 main = "src/index.js"
 compatibility_date = "2024-04-05"
 
-# Every 5 minutes - sync interactions from Bluesky
+# Cron for interaction sync
 [triggers]
 crons = ["*/5 * * * *"]
 
-# D1 Database for records, sequences, and interactions
-[[d1_databases]]
-binding = "DB"
-database_name = "atproto-pds"
-database_id = "your-d1-database-id"  # Replace after `npx wrangler d1 create atproto-pds`
+# KV for journal cache
+[[kv_namespaces]]
+binding = "JOURNAL_KV"
+id = "your-kv-namespace-id"  # Create with: npx wrangler kv namespace create JOURNAL_KV
 
-# Durable Object for WebSocket subscriptions (firehose)
+# Durable Object for WebSocket subscriptions
 [[durable_objects.bindings]]
 name = "FIREHOSE"
 class_name = "Firehose"
 
-# Durable Object migrations
 [[migrations]]
 tag = "v1"
 new_classes = ["Firehose"]
 
-# Environment variables
 [vars]
-# Your DID - use did:web:yourdomain.com or did:plc:xxx
+# Your DID
 OWNER_DID = ""
-# Your handle - e.g., yourname.bsky.social or handle.yourdomain.com
+# Your handle
 OWNER_HANDLE = ""
+# URL to fetch journal from (for /refresh endpoint)
+JOURNAL_URL = ""
 
 # Development overrides
 [env.dev.vars]
 OWNER_DID = "did:web:localhost:8787"
 OWNER_HANDLE = "localhost"
+# For local dev, journal is loaded from file
