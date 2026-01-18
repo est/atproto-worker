@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "dev:local": "JOURNAL_CONTENT=$(cat journal.ndjson 2>/dev/null) wrangler dev",
+    "dev:local": "wrangler dev --var JOURNAL_CONTENT:\"$(cat journal.ndjson 2>/dev/null)\"",
     "deploy": "wrangler deploy",
     "seal": "node cli/seal.js",
     "seal:init": "node cli/seal.js init",
@@ -14,6 +14,7 @@
   },
   "devDependencies": {
     "@noble/secp256k1": "^2.1.0",
-    "wrangler": "^3.47.0"
+    "wrangler": "^3.47.0",
+    "ws": "^8.19.0"
   }
 }

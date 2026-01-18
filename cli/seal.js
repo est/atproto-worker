@@ -98,6 +98,34 @@ async function init() {
 }
 
 /**
+ * Rotate key - generate a new keypair
+ */
+async function rotateKey() {
+    const config = loadConfig()
+    if (!config) {
+        console.error('Not initialized. Run: node cli/sign.js init')
+        process.exit(1)
+    }
+
+    console.log('Rotating secp256k1 keypair...')
+    const { privateKey, publicKey } = await generateKeypair()
+
+    config.privateKey = privateKey
+    config.publicKey = publicKey
+    config.publicKeyMultibase = publicKeyToMultibase(publicKey)
+
+    saveConfig(config)
+
+    console.log('✓ Keypair rotated')
+    console.log(`  New Public Key: ${publicKey.slice(0, 16)}...`)
+    console.log(`  New Multibase: ${config.publicKeyMultibase}`)
+    console.log('')
+    console.log('Config updated in config.json')
+    console.log('IMPORTANT: You must update OWNER_PUBLIC_KEY in wrangler.toml and redeploy')
+    console.log('so that your DID document reflects the new key.')
+}
+
+/**
  * Create a post
  */
 async function createPost(text) {
@@ -282,6 +310,9 @@ switch (command) {
     case 'init':
         init()
         break
+    case 'rotate-key':
+        rotateKey()
+        break
     case 'post':
         createPost(process.argv[3] || 'Hello from atproto-worker!')
         break
@@ -302,11 +333,12 @@ switch (command) {
 ATProto Signing CLI
 
 Usage:
-  node cli/sign.js init [did] [handle]   Initialize with keypair
-  node cli/sign.js post "text"           Create a post
-  node cli/sign.js like at://...         Like a post
-  node cli/sign.js follow did:...        Follow someone
-  node cli/sign.js validate              Validate journal integrity
-  node cli/sign.js list                  List all records
+  node cli/seal.js init [did] [handle]   Initialize with keypair
+  node cli/seal.js rotate-key            Generate a new keypair
+  node cli/seal.js post "text"           Create a post
+  node cli/seal.js like at://...         Like a post
+  node cli/seal.js follow did:...        Follow someone
+  node cli/seal.js validate              Validate journal integrity
+  node cli/seal.js list                  List all records
 `)
 }

@@ -4,6 +4,7 @@
  */
 
 import { cborEncode } from './utils.js'
+import { Journal } from './journal.js'
 
 /**
  * Firehose Durable Object
@@ -53,7 +54,6 @@ export class Firehose {
     async backfill(ws, cursor) {
         try {
             // Load journal
-            const { Journal } = await import('./journal.js')
             const journal = new Journal(this.env)
             await journal.load()
 

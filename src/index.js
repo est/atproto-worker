@@ -89,7 +89,11 @@ export default {
                 response = new Response('Not Found', { status: 404 })
             }
 
-            // Add CORS
+            // Add CORS (except for 101 Switching Protocols)
+            if (response.status === 101) {
+                return response
+            }
+
             const newHeaders = new Headers(response.headers)
             for (const [key, value] of Object.entries(corsHeaders)) {
                 newHeaders.set(key, value)

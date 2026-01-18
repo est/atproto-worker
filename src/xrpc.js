@@ -48,6 +48,9 @@ export async function handleXrpc(request, { journal, did, handle, env }) {
         case 'com.atproto.sync.getLatestCommit':
             return handleGetLatestCommit(url, journal, did)
 
+        case '_health':
+            return handleHealth(journal)
+
         // Write operations not supported (use CLI)
         case 'com.atproto.repo.createRecord':
         case 'com.atproto.repo.putRecord':
@@ -58,6 +61,17 @@ export async function handleXrpc(request, { journal, did, handle, env }) {
         default:
             return xrpcError(501, 'MethodNotImplemented', `Method ${method} is not implemented`)
     }
+}
+
+/**
+ * /xrpc/_health - health check
+ */
+function handleHealth(journal) {
+    const version = '0.2.0'
+    if (!journal.loaded) {
+        return xrpcError(503, 'ServiceUnavailable', 'Journal not loaded')
+    }
+    return xrpcSuccess({ version })
 }
 
 /**
