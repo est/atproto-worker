@@ -45,10 +45,24 @@ export default {
 
             // Refresh endpoint - sync journal from HTTP source
             if (path === '/refresh') {
+                const oldEventCount = journal.events.length
                 const result = await journal.refresh()
+                const newEvents = journal.events.slice(oldEventCount)
+
+                // Broadcast new events to firehose
+                if (newEvents.length > 0) {
+                    const id = env.FIREHOSE.idFromName('main')
+                    const stub = env.FIREHOSE.get(id)
+                    ctx.waitUntil(stub.fetch('http://localhost/broadcast', {
+                        method: 'POST',
+                        body: JSON.stringify({ events: newEvents }),
+                        headers: { 'Content-Type': 'application/json' }
+                    }))
+                }
+
                 response = new Response(JSON.stringify({
                     ok: true,
-                    message: 'Journal refreshed',
+                    message: `Journal refreshed, ${newEvents.length} new events broadcasted`,
                     ...result
                 }), {
                     headers: { 'Content-Type': 'application/json' }
@@ -122,6 +136,7 @@ export default {
     async scheduled(controller, env, ctx) {
         const journal = new Journal(env)
         await journal.load()
+        const oldEventCount = journal.events.length
 
         const did = env.OWNER_DID
         const handle = env.OWNER_HANDLE
@@ -132,6 +147,17 @@ export default {
         if (env.JOURNAL_URL) {
             try {
                 await journal.refresh()
+                const newEvents = journal.events.slice(oldEventCount)
+
+                if (newEvents.length > 0) {
+                    const id = env.FIREHOSE.idFromName('main')
+                    const stub = env.FIREHOSE.get(id)
+                    ctx.waitUntil(stub.fetch('http://localhost/broadcast', {
+                        method: 'POST',
+                        body: JSON.stringify({ events: newEvents }),
+                        headers: { 'Content-Type': 'application/json' }
+                    }))
+                }
             } catch (e) {
                 console.error('Journal refresh failed:', e)
             }

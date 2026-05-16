@@ -19,13 +19,13 @@ export async function generateKeypair() {
   // Generate 32 random bytes for private key
   const privateKeyBytes = new Uint8Array(32)
   webcrypto.getRandomValues(privateKeyBytes)
-  
+
   // Import @noble/secp256k1 dynamically (installed as dev dependency)
   const secp = await import('@noble/secp256k1')
-  
+
   // Derive public key
   const publicKeyBytes = secp.getPublicKey(privateKeyBytes, true) // compressed
-  
+
   return {
     privateKey: bytesToHex(privateKeyBytes),
     publicKey: bytesToHex(publicKeyBytes)
@@ -37,17 +37,17 @@ export async function generateKeypair() {
  */
 export async function sign(message, privateKeyHex) {
   const secp = await import('@noble/secp256k1')
-  
+
   // Hash the message with SHA-256
-  const messageBytes = typeof message === 'string' 
-    ? new TextEncoder().encode(message) 
+  const messageBytes = typeof message === 'string'
+    ? new TextEncoder().encode(message)
     : message
   const hash = await webcrypto.subtle.digest('SHA-256', messageBytes)
-  
+
   // Sign the hash
   const privateKey = hexToBytes(privateKeyHex)
   const signature = await secp.signAsync(new Uint8Array(hash), privateKey)
-  
+
   return bytesToHex(signature.toCompactRawBytes())
 }
 
@@ -56,15 +56,15 @@ export async function sign(message, privateKeyHex) {
  */
 export async function verify(message, signatureHex, publicKeyHex) {
   const secp = await import('@noble/secp256k1')
-  
+
   const messageBytes = typeof message === 'string'
     ? new TextEncoder().encode(message)
     : message
   const hash = await webcrypto.subtle.digest('SHA-256', messageBytes)
-  
+
   const signature = hexToBytes(signatureHex)
   const publicKey = hexToBytes(publicKeyHex)
-  
+
   return secp.verify(signature, new Uint8Array(hash), publicKey)
 }
 
@@ -85,7 +85,7 @@ export function publicKeyToMultibase(publicKeyHex) {
  */
 export function cborEncode(value) {
   const chunks = []
-  
+
   function encode(val) {
     if (val === null || val === undefined) {
       chunks.push(new Uint8Array([0xf6]))
@@ -126,7 +126,10 @@ export function cborEncode(value) {
         chunks.push(new Uint8Array([0x00]))
         chunks.push(cidBytes)
       } else {
-        const keys = Object.keys(val).sort()
+        const keys = Object.keys(val).sort((a, b) => {
+          if (a.length !== b.length) return a.length - b.length
+          return a < b ? -1 : 1
+        })
         encodeUint(5, keys.length)
         for (const key of keys) {
           encode(key)
@@ -135,7 +138,7 @@ export function cborEncode(value) {
       }
     }
   }
-  
+
   function encodeUint(major, n) {
     if (n < 24) {
       chunks.push(new Uint8Array([(major << 5) | n]))
@@ -159,9 +162,9 @@ export function cborEncode(value) {
       chunks.push(buf)
     }
   }
-  
+
   encode(value)
-  
+
   const totalLength = chunks.reduce((sum, c) => sum + c.length, 0)
   const result = new Uint8Array(totalLength)
   let offset = 0
@@ -169,7 +172,7 @@ export function cborEncode(value) {
     result.set(chunk, offset)
     offset += chunk.length
   }
-  
+
   return result
 }
 
@@ -179,7 +182,7 @@ export function cborEncode(value) {
 export async function computeCID(value) {
   const cbor = cborEncode(value)
   const hash = await webcrypto.subtle.digest('SHA-256', cbor)
-  
+
   // CID v1: version(1) + codec(dag-cbor=0x71) + hash-type(sha256=0x12) + hash-len(32) + hash
   const cid = new Uint8Array(2 + 2 + 32)
   cid[0] = 0x01 // CID version 1
@@ -187,7 +190,7 @@ export async function computeCID(value) {
   cid[2] = 0x12 // sha2-256 hash
   cid[3] = 0x20 // 32 bytes
   cid.set(new Uint8Array(hash), 4)
-  
+
   // Encode as base32lower with 'b' prefix (multibase)
   return 'b' + base32Encode(cid)
 }
@@ -220,21 +223,21 @@ function base32Encode(bytes) {
   let result = ''
   let bits = 0
   let value = 0
-  
+
   for (const byte of bytes) {
     value = (value << 8) | byte
     bits += 8
-    
+
     while (bits >= 5) {
       bits -= 5
       result += B32_CHARSET[(value >> bits) & 31]
     }
   }
-  
+
   if (bits > 0) {
     result += B32_CHARSET[(value << (5 - bits)) & 31]
   }
-  
+
   return result
 }
 
@@ -242,20 +245,20 @@ function base32Decode(str) {
   const result = []
   let bits = 0
   let value = 0
-  
+
   for (const char of str.toLowerCase()) {
     const idx = B32_CHARSET.indexOf(char)
     if (idx === -1) continue
-    
+
     value = (value << 5) | idx
     bits += 5
-    
+
     if (bits >= 8) {
       bits -= 8
       result.push((value >> bits) & 0xff)
     }
   }
-  
+
   return new Uint8Array(result)
 }
 
@@ -268,7 +271,7 @@ function base58Encode(bytes) {
   for (const byte of bytes) {
     num = num * 256n + BigInt(byte)
   }
-  
+
   // Convert to base58
   let result = ''
   while (num > 0n) {
@@ -276,7 +279,7 @@ function base58Encode(bytes) {
     num = num / 58n
     result = B58_ALPHABET[Number(remainder)] + result
   }
-  
+
   // Handle leading zeros
   for (const byte of bytes) {
     if (byte === 0) {
@@ -285,6 +288,6 @@ function base58Encode(bytes) {
       break
     }
   }
-  
+
   return result
 }

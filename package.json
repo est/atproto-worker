@@ -10,7 +10,7 @@
     "seal": "node cli/seal.js",
     "seal:init": "node cli/seal.js init",
     "seal:post": "node cli/seal.js post",
-    "test": "node tests/crypto.test.js && node tests/journal.test.js"
+    "test": "node tests/crypto.test.js && node tests/journal.test.js && node tests/interop.test.js"
   },
   "devDependencies": {
     "@noble/secp256k1": "^2.1.0",

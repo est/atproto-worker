@@ -1,7 +1,7 @@
 import WebSocket from 'ws'
 import { cborDecode } from '../src/utils.js'
 
-const ws = new WebSocket('ws://localhost:62603/xrpc/com.atproto.sync.subscribeRepos')
+const ws = new WebSocket('ws://localhost:49879/xrpc/com.atproto.sync.subscribeRepos?cursor=-1')
 
 ws.on('open', () => {
     console.log('Connected to firehose')

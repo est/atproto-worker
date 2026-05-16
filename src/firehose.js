@@ -22,6 +22,12 @@ export class Firehose {
             return this.handleWebSocket(request, url)
         }
 
+        if (url.pathname === '/broadcast' && request.method === 'POST') {
+            const body = await request.json()
+            await this.broadcast(body.events)
+            return new Response('OK')
+        }
+
         return new Response('Not Found', { status: 404 })
     }
 
@@ -37,6 +43,7 @@ export class Firehose {
         const cursor = url.searchParams.get('cursor')
         const [client, server] = Object.values(new WebSocketPair())
 
+        // Need to accept the server-side websocket via state to handle events
         this.state.acceptWebSocket(server)
         server.serializeAttachment({ cursor: cursor ? parseInt(cursor) : null })
 
@@ -57,7 +64,10 @@ export class Firehose {
             const journal = new Journal(this.env)
             await journal.load()
 
-            const events = journal.getEventsFromCursor(cursor, 1000)
+            const allEvents = journal.getEventsFromCursor(cursor, 1000)
+
+            // Filter by OWNER_DID
+            const events = allEvents.filter(e => e.did === this.env.OWNER_DID)
 
             for (const event of events) {
                 const message = this.formatEvent(event)
@@ -69,13 +79,36 @@ export class Firehose {
                 }
             }
 
-            // Update cursor
-            if (events.length > 0) {
-                const lastOffset = events[events.length - 1].offset
+            // Update cursor based on actual journal offset, 
+            // even if filtered out, so we don't re-process
+            if (allEvents.length > 0) {
+                const lastOffset = allEvents[allEvents.length - 1].offset
                 ws.serializeAttachment({ cursor: lastOffset })
             }
         } catch (e) {
             console.error('Backfill error:', e)
+        }
+    }
+
+    /**
+     * Broadcast new events to all connected clients
+     * @param {Array} events - New events from journal
+     */
+    async broadcast(events) {
+        const filteredEvents = events.filter(e => e.did === this.env.OWNER_DID)
+        if (filteredEvents.length === 0) return
+
+        const formattedEvents = filteredEvents.map(e => cborEncode(this.formatEvent(e)))
+        const sockets = this.state.getWebSockets()
+
+        for (const ws of sockets) {
+            for (const msg of formattedEvents) {
+                try {
+                    ws.send(msg)
+                } catch (e) {
+                    // socket closed, will be removed by DO eventually
+                }
+            }
         }
     }
 

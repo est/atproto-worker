@@ -14,24 +14,24 @@ let clockSeq = 0
  */
 export function generateTID() {
   let timestamp = Date.now() * 1000 // microseconds
-  
+
   if (timestamp === lastTimestamp) {
     clockSeq++
   } else {
     lastTimestamp = timestamp
     clockSeq = 0
   }
-  
+
   // Combine timestamp with clock sequence
   const combined = BigInt(timestamp) << 10n | BigInt(clockSeq & 0x3ff)
-  
+
   let tid = ''
   let n = combined
   for (let i = 0; i < 13; i++) {
     tid = B32_CHARSET[Number(n & 31n)] + tid
     n >>= 5n
   }
-  
+
   return tid
 }
 
@@ -39,16 +39,63 @@ export function generateTID() {
  * Parse an AT-URI: at://did/collection/rkey
  */
 export function parseAtUri(uri) {
-  if (!uri || !uri.startsWith('at://')) return null
-  
-  const parts = uri.slice(5).split('/')
-  if (parts.length < 2) return null
-  
-  return {
-    repo: parts[0],  // DID or handle
-    collection: parts[1],
-    rkey: parts[2] || null
+  if (!uri || !uri.startsWith('at://') || uri.length > 8192 || uri.endsWith('/') || uri.includes(' ')) return null
+
+  // Check for fragments - allowed but not by our simple splitter logic usually
+  const fragmentParts = uri.split('#')
+  if (fragmentParts.length > 2) return null // Multiple #
+
+  let base = uri
+  if (fragmentParts.length === 2) {
+    const fragment = fragmentParts[1]
+    if (!fragment || fragment.includes('/')) return null
+    base = fragmentParts[0]
   }
+
+  const parts = base.slice(5).split('/')
+  if (parts.length < 1 || parts.length > 3) return null
+
+  const repo = parts[0]
+  const collection = parts[1] || null
+  const rkey = parts[2] || null
+
+  // Basic segment validation
+  if (!repo || !isValidHandle(repo) && !/^did:[a-z]+:[a-zA-Z0-9._:%-]+$/.test(repo)) return null
+
+  // Lexicon/NSID rules for collection
+  if (parts.length > 1) {
+    if (!isValidNsid(collection)) return null
+  }
+
+  if (parts.length > 2) {
+    if (!isValidRecordKey(rkey)) return null
+  }
+
+  return { repo, collection, rkey }
+}
+
+const NSID_REGEX = /^[a-zA-Z](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(?:\.[a-zA-Z](?:[a-zA-Z0-9]{0,62})?)$/
+
+/**
+ * Validate an NSID (official atproto implementation)
+ */
+export function isValidNsid(nsid) {
+  if (!nsid || typeof nsid !== 'string') return false
+  if (nsid.length > 317) return false
+  return NSID_REGEX.test(nsid)
+}
+
+const RECORD_KEY_REGEX = /^[a-zA-Z0-9_~.:-]{1,512}$/
+const RECORD_KEY_INVALID_VALUES = new Set(['.', '..'])
+
+/**
+ * Validate a record key (official atproto implementation)
+ */
+export function isValidRecordKey(rkey) {
+  if (!rkey || typeof rkey !== 'string') return false
+  if (rkey.length < 1 || rkey.length > 512) return false
+  if (RECORD_KEY_INVALID_VALUES.has(rkey)) return false
+  return RECORD_KEY_REGEX.test(rkey)
 }
 
 /**
@@ -67,7 +114,7 @@ export async function generateCID(data) {
   const dataBytes = encoder.encode(JSON.stringify(data))
   const hashBuffer = await crypto.subtle.digest('SHA-256', dataBytes)
   const hashArray = new Uint8Array(hashBuffer)
-  
+
   // Encode as base32 (similar to CID v1 format, simplified)
   return 'baf' + base32Encode(hashArray).slice(0, 56)
 }
@@ -79,39 +126,46 @@ function base32Encode(bytes) {
   let result = ''
   let bits = 0
   let value = 0
-  
+
   for (const byte of bytes) {
     value = (value << 8) | byte
     bits += 8
-    
+
     while (bits >= 5) {
       bits -= 5
       result += B32_CHARSET[(value >> bits) & 31]
     }
   }
-  
+
   if (bits > 0) {
     result += B32_CHARSET[(value << (5 - bits)) & 31]
   }
-  
+
   return result
 }
 
 /**
  * Validate a handle format
  */
+const HANDLE_REGEX = /^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/
+
+/**
+ * Validate a handle format (official atproto implementation)
+ */
 export function isValidHandle(handle) {
   if (!handle || typeof handle !== 'string') return false
-  // Simple validation: alphanumeric with dots, at least one dot
-  return /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/.test(handle)
+  if (handle.length > 253) return false
+  return HANDLE_REGEX.test(handle)
 }
 
 /**
- * Validate a DID format
+ * Validate a DID format (official atproto implementation)
  */
 export function isValidDID(did) {
   if (!did || typeof did !== 'string') return false
-  return /^did:[a-z]+:[a-zA-Z0-9._:%-]+$/.test(did)
+  if (did.length > 2048) return false
+  if (did.endsWith(':') || did.endsWith('%')) return false
+  return /^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$/.test(did)
 }
 
 /**
@@ -127,7 +181,7 @@ export function nowISO() {
  */
 export function cborEncode(value) {
   const chunks = []
-  
+
   function encode(val) {
     if (val === null || val === undefined) {
       chunks.push(new Uint8Array([0xf6])) // null
@@ -159,7 +213,10 @@ export function cborEncode(value) {
       encodeUint(4, val.length)
       for (const item of val) encode(item)
     } else if (typeof val === 'object') {
-      const keys = Object.keys(val).sort()
+      const keys = Object.keys(val).sort((a, b) => {
+        if (a.length !== b.length) return a.length - b.length
+        return a < b ? -1 : 1
+      })
       encodeUint(5, keys.length)
       for (const key of keys) {
         encode(key)
@@ -167,7 +224,7 @@ export function cborEncode(value) {
       }
     }
   }
-  
+
   function encodeUint(major, n) {
     if (n < 24) {
       chunks.push(new Uint8Array([(major << 5) | n]))
@@ -191,9 +248,9 @@ export function cborEncode(value) {
       chunks.push(buf)
     }
   }
-  
+
   encode(value)
-  
+
   // Concatenate all chunks
   const totalLength = chunks.reduce((sum, c) => sum + c.length, 0)
   const result = new Uint8Array(totalLength)
@@ -202,7 +259,7 @@ export function cborEncode(value) {
     result.set(chunk, offset)
     offset += chunk.length
   }
-  
+
   return result
 }
 
@@ -213,18 +270,18 @@ export function cborDecode(bytes) {
   if (!(bytes instanceof Uint8Array)) {
     bytes = new Uint8Array(bytes)
   }
-  
+
   let pos = 0
-  
+
   function decode() {
     if (pos >= bytes.length) throw new Error('Unexpected end of CBOR data')
-    
+
     const initial = bytes[pos++]
     const major = initial >> 5
     const additional = initial & 0x1f
-    
+
     let value = readUint(additional)
-    
+
     switch (major) {
       case 0: return value // unsigned int
       case 1: return -1 - value // negative int
@@ -275,7 +332,7 @@ export function cborDecode(bytes) {
         throw new Error(`Unknown CBOR major type: ${major}`)
     }
   }
-  
+
   function readUint(additional) {
     if (additional < 24) return additional
     if (additional === 24) return bytes[pos++]
@@ -296,6 +353,6 @@ export function cborDecode(bytes) {
     }
     throw new Error(`Invalid additional value: ${additional}`)
   }
-  
+
   return decode()
 }

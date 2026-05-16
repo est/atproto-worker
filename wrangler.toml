@@ -22,9 +22,9 @@ new_classes = ["Firehose"]
 
 [vars]
 # Your DID
-OWNER_DID = ""
+OWNER_DID = "did:web:example.com"
 # Your handle
-OWNER_HANDLE = ""
+OWNER_HANDLE = "example.com"
 # Your public key multibase (from seal.js)
 OWNER_PUBLIC_KEY = ""
 # URL to fetch journal from (for /refresh endpoint)
@@ -32,7 +32,7 @@ JOURNAL_URL = ""
 
 # Development overrides
 [env.dev.vars]
-OWNER_DID = "did:web:localhost:8787"
-OWNER_HANDLE = "localhost"
+OWNER_DID = "did:web:example.com"
+OWNER_HANDLE = "example.com"
 OWNER_PUBLIC_KEY = "zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF"
 # For local dev, journal is loaded from file

@@ -93,15 +93,7 @@ export async function resolveHandle(handle, ownerHandle, ownerDid) {
  * Validate that a DID matches expected format
  */
 export function validateDid(did) {
-    if (!did || typeof did !== 'string') return false
-
-    // did:plc or did:web format
-    if (did.startsWith('did:plc:')) {
-        return /^did:plc:[a-z2-7]{24}$/.test(did)
-    }
-    if (did.startsWith('did:web:')) {
-        return /^did:web:[a-zA-Z0-9._:%-]+$/.test(did)
-    }
-
-    return false
+    if (!did || typeof did !== 'string' || did.length > 2048) return false
+    if (did.endsWith(':') || did.endsWith('%')) return false
+    return /^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$/.test(did)
 }
