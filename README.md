@@ -13,19 +13,20 @@ No database. No mutable state. Just static files and a stateless worker.
 ## Architecture
 
 ```
-┌─────────────────┐      ┌──────────────────────┐
-│  Local CLI       │      │  Static Host          │
-│  (cli/seal.js)   │─────▶│  (journal.ndjson)     │
-│  Signs & appends │      │  S3, GitHub Pages...  │
-└─────────────────┘      └──────────┬───────────┘
-                                    │ /refresh
-                                    ▼
-                         ┌──────────────────────┐
+┌──────────────────┐      ┌──────────────────────┐
+│  Local CLI       │      │  Static Host         │
+│  Remote service  │─────▶│  (journal.ndjson)    │
+│  (cli/seal.js)   │      │                      │
+│  Signs & appends │      │  S3, GitHub Pages... │
+└──────────────────┘      └──────────┬───────────┘
+                                     │ /refresh
+                                     ▼
+                         ┌───────────────────────┐
                          │  Cloudflare Worker    │
                          │  - XRPC API           │
                          │  - WebSocket firehose │
                          │  - DID documents      │
-                         └──────────────────────┘
+                         └───────────────────────┘
 ```
 
 ## Quick Start
