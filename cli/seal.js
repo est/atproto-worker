@@ -183,18 +183,28 @@ async function createPost(text) {
 /**
  * Create a like
  */
-async function createLike(subjectUri) {
+async function createLike(subjectUri, subjectCid) {
     const config = loadConfig()
     if (!config) {
         console.error('Not initialized. Run: node cli/sign.js init')
         process.exit(1)
     }
 
+    if (!subjectUri) {
+        console.error('Usage: node cli/seal.js like <at-uri> <cid>')
+        console.error('  subjectUri is required (e.g., at://did:plc:xxx/app.bsky.feed.post/yyy)')
+        process.exit(1)
+    }
+
+    if (!subjectCid) {
+        console.error('subjectCid is required for like records')
+        console.error('Usage: node cli/seal.js like <at-uri> <cid>')
+        console.error('  The CID identifies the specific version of the record being liked')
+        process.exit(1)
+    }
+
     const journal = new JournalWriter(JOURNAL_PATH)
     const rkey = generateTID()
-
-    // Parse subject URI to get CID (simplified - in real impl would fetch)
-    const subjectCid = 'bafyreiexample' // Placeholder
 
     const record = {
         $type: 'app.bsky.feed.like',
@@ -226,6 +236,66 @@ async function createLike(subjectUri) {
     console.log('✓ Like created')
     console.log(`  URI: at://${config.did}/app.bsky.feed.like/${rkey}`)
     console.log(`  Subject: ${subjectUri}`)
+    console.log(`  Subject CID: ${subjectCid}`)
+}
+
+/**
+ * Create a repost
+ */
+async function createRepost(subjectUri, subjectCid) {
+    const config = loadConfig()
+    if (!config) {
+        console.error('Not initialized. Run: node cli/sign.js init')
+        process.exit(1)
+    }
+
+    if (!subjectUri) {
+        console.error('Usage: node cli/seal.js repost <at-uri> <cid>')
+        console.error('  subjectUri is required (e.g., at://did:plc:xxx/app.bsky.feed.post/yyy)')
+        process.exit(1)
+    }
+
+    if (!subjectCid) {
+        console.error('subjectCid is required for repost records')
+        console.error('Usage: node cli/seal.js repost <at-uri> <cid>')
+        console.error('  The CID identifies the specific version of the record being reposted')
+        process.exit(1)
+    }
+
+    const journal = new JournalWriter(JOURNAL_PATH)
+    const rkey = generateTID()
+
+    const record = {
+        $type: 'app.bsky.feed.repost',
+        subject: {
+            uri: subjectUri,
+            cid: subjectCid
+        },
+        createdAt: new Date().toISOString()
+    }
+
+    const commitData = {
+        op: 'create',
+        collection: 'app.bsky.feed.repost',
+        rkey,
+        record,
+        prev: journal.prevCid
+    }
+
+    const cid = await computeCID(commitData)
+    const sig = await sign(cid, config.privateKey)
+
+    const event = await journal.append({
+        ...commitData,
+        cid,
+        sig,
+        did: config.did
+    })
+
+    console.log('✓ Repost created')
+    console.log(`  URI: at://${config.did}/app.bsky.feed.repost/${rkey}`)
+    console.log(`  Subject: ${subjectUri}`)
+    console.log(`  Subject CID: ${subjectCid}`)
 }
 
 /**
@@ -324,7 +394,10 @@ switch (command) {
         createPost(process.argv[3] || 'Hello from atproto-worker!')
         break
     case 'like':
-        createLike(process.argv[3])
+        createLike(process.argv[3], process.argv[4])
+        break
+    case 'repost':
+        createRepost(process.argv[3], process.argv[4])
         break
     case 'follow':
         createFollow(process.argv[3])
@@ -343,7 +416,8 @@ Usage:
   node cli/seal.js init [did] [handle]   Initialize with keypair
   node cli/seal.js rotate-key            Generate a new keypair
   node cli/seal.js post "text"           Create a post
-  node cli/seal.js like at://...         Like a post
+  node cli/seal.js like <at-uri> <cid>   Like a post (requires subject CID)
+  node cli/seal.js repost <at-uri> <cid> Repost (requires subject CID)
   node cli/seal.js follow did:...        Follow someone
   node cli/seal.js validate              Validate journal integrity
   node cli/seal.js list                  List all records

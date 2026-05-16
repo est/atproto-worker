@@ -91,8 +91,21 @@ desc: 基于项目现状的完整评估与后续协作清单
 
 ### issue 3-04 CLI 记录生成存在错误数据和未完成能力
 
-【中高】本地写入链路虽然已经可用，但还存在明显的错误实现和未兑现能力。[cli/seal.js](../src/cli/seal.js:190) 中 `like` 的 `subjectCid` 目前是硬编码占位值，会生成不可信记录；同一个文件头部注释写了 `repost`，但命令分发中没有对应实现 [cli/seal.js](../src/cli/seal.js:5)。如果这个 CLI 是唯一写入口，就不能容忍“看起来能用，实际写错数据”的状态。
+【中高】本地写入链路虽然已经可用，但还存在明显的错误实现和未兑现能力。[cli/seal.js](../src/cli/seal.js:190) 中 `like` 的 `subjectCid` 目前是硬编码占位值，会生成不可信记录；同一个文件头部注释写了 `repost`，但命令分发中没有对应实现 [cli/seal.js](../src/cli/seal.js:5)。如果这个 CLI 是唯一写入口，就不能容忍"看起来能用，实际写错数据"的状态。
 
+- [X] 修复 like 命令 - 要求用户提供 subjectCid
+- [X] 添加 repost 命令实现
+- [X] 更新帮助文本
+- [X] npm test：验证全部通过
+
+代码反馈：
+
+- `like` 命令现在要求用户提供 `subjectUri` 和 `subjectCid` 两个参数，不再使用硬编码占位值。
+- 新增 `repost` 命令实现，结构与 `like` 类似，记录类型为 `app.bsky.feed.repost`。
+- `subjectCid` 是 atproto 中标识记录特定版本的必要字段，不能省略或伪造。
+- 帮助文本已更新，明确说明 `like` 和 `repost` 需要提供 CID。
+
+完成时间：2025-05-16 01:00
 
 ### issue 3-05 interactions 目前只有抓取日志，没有形成可用能力
 
