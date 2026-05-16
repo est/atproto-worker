@@ -3,6 +3,8 @@
  * Worker-side: reads local journal file, syncs from HTTP on refresh
  */
 
+import { computeCID } from './utils.js'
+
 /**
  * Parse NDJSON journal content into events array
  */
@@ -43,7 +45,9 @@ export class Journal {
         }
 
         if (content) {
-            this.events = parseJournal(content)
+            const events = parseJournal(content)
+            await this.validate(events)
+            this.events = events
             this.index()
         }
 
@@ -52,6 +56,7 @@ export class Journal {
 
     /**
      * Refresh journal from HTTP source
+     * Validates chain integrity before accepting new data
      */
     async refresh() {
         const url = this.env.JOURNAL_URL
@@ -68,7 +73,12 @@ export class Journal {
         }
 
         const content = await resp.text()
-        this.events = parseJournal(content)
+        const newEvents = parseJournal(content)
+
+        // Validate before accepting - preserves old data on failure
+        await this.validate(newEvents)
+
+        this.events = newEvents
         this.index()
 
         // Cache in KV
@@ -77,6 +87,40 @@ export class Journal {
         }
 
         return { eventCount: this.events.length }
+    }
+
+    /**
+     * Validate journal chain integrity (CID chain and prev links)
+     * Throws on validation failure
+     */
+    async validate(events) {
+        let prevCid = null
+
+        for (const event of events) {
+            // Check prev chain
+            if (event.prev !== prevCid) {
+                throw new Error(`Journal chain broken at offset ${event.offset}: expected prev=${prevCid}, got ${event.prev}`)
+            }
+
+            // Verify CID if present
+            if (event.cid) {
+                const expectedCid = await computeCID({
+                    op: event.op,
+                    collection: event.collection,
+                    rkey: event.rkey,
+                    record: event.record,
+                    prev: event.prev
+                })
+
+                if (event.cid !== expectedCid) {
+                    throw new Error(`CID mismatch at offset ${event.offset}: expected ${expectedCid}, got ${event.cid}`)
+                }
+            }
+
+            prevCid = event.cid
+        }
+
+        return true
     }
 
     /**

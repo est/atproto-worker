@@ -54,10 +54,40 @@ desc: 基于项目现状的完整评估与后续协作清单
 
 【高】Worker 侧把远端 journal 当作可信输入使用，但当前并没有做完整性校验。[src/journal.js](../src/src/journal.js:31) 中的 `load()` 和 `refresh()` 只负责读取、解析、建立索引和写入 KV；真正的链校验只存在于本地 CLI 的 [cli/journal.js](../src/cli/journal.js:95)。这意味着一旦静态托管源、CDN、对象存储、发布流程或缓存被污染，Worker 会把伪造事件直接作为真实 repo 向外暴露。项目既然把“静态文件 + 不可信托管”当作核心卖点，这个缺口必须补上。
 
+- [X] 在 src/utils.js 添加 computeCID 函数（与 CLI 实现一致）
+- [X] 在 src/journal.js 添加 validate() 方法，校验 prev 链和 CID
+- [X] load() 调用校验，失败时拒绝加载
+- [X] refresh() 调用校验，失败时保留旧数据
+- [X] npm test：验证全部通过
+
+代码反馈：
+
+- `src/utils.js` 新增 `computeCID` 函数，使用 dag-cbor 编码和 CID v1 格式，与 CLI 实现一致。
+- `src/journal.js` 新增 `validate()` 方法，校验 prev 链连续性和 CID 正确性。
+- `load()` 在解析后立即校验，校验失败会抛出错误阻止加载污染数据。
+- `refresh()` 在替换事件前校验，校验失败保留旧数据，避免服务中断。
+- 校验逻辑对每个事件都会验证 CID，确保数据未被篡改。
+
+完成时间：2025-05-16 00:45
+
 
 ### issue 3-03 DID 身份模型和文档输出不一致
 
 【高】当前身份模型有自相矛盾的风险。根入口和 `/.well-known/atproto-did` 使用的是 `OWNER_DID` [src/index.js](../src/src/index.js:40)，但 `/.well-known/did.json` 会无条件生成 `did:web:${host}` [src/did.js](../src/src/did.js:20)。只要 `OWNER_DID` 不是当前 host 的 `did:web`，这两个出口就会返回不同身份。这个问题会直接影响 handle 解析、DID 文档可信性和后续跨实现兼容性。
+
+- [X] 修改 did.js - generateDidWebDocument 支持传入完整 did
+- [X] 修改 did.js - handleDidJson 增加 DID 类型校验
+- [X] 修改 index.js - 传递完整 did 给 handleDidJson
+- [X] npm test：验证全部通过
+
+代码反馈：
+
+- `did.js` 的 `generateDidWebDocument` 现在支持可选 `did` 参数，允许使用 `OWNER_DID` 而不是硬编码 `did:web:${host}`。
+- `handleDidJson` 增加了 DID 类型校验：非 `did:web` 返回 404，`did:web` 与 host 不匹配返回 400。
+- 这意味着 `did:plc` 身份的部署者不会在 `did.json` 端点得到错误的 `did:web` 文档。
+- `/.well-known/atproto-did` 和 `/.well-known/did.json` 现在会返回一致的身份信息。
+
+完成时间：2025-05-16 00:30
 
 ### issue 3-04 CLI 记录生成存在错误数据和未完成能力
 

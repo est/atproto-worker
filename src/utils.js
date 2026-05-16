@@ -5,6 +5,9 @@
 // TID: Timestamp Identifier (used as record keys)
 // Format: 13 chars, base32-sortish encoding of timestamp + clock sequence
 const B32_CHARSET = '234567abcdefghijklmnopqrstuvwxyz'
+
+// Base32 lowercase charset (RFC 4648) - used for CID encoding
+const B32_LOWER = 'abcdefghijklmnopqrstuvwxyz234567'
 let lastTimestamp = 0
 let clockSeq = 0
 
@@ -355,4 +358,49 @@ export function cborDecode(bytes) {
   }
 
   return decode()
+}
+
+/**
+ * Base32 lowercase encoding (RFC 4648) - for CID encoding
+ */
+function base32LowerEncode(bytes) {
+  let result = ''
+  let bits = 0
+  let value = 0
+
+  for (const byte of bytes) {
+    value = (value << 8) | byte
+    bits += 8
+
+    while (bits >= 5) {
+      bits -= 5
+      result += B32_LOWER[(value >> bits) & 31]
+    }
+  }
+
+  if (bits > 0) {
+    result += B32_LOWER[(value << (5 - bits)) & 31]
+  }
+
+  return result
+}
+
+/**
+ * Compute CID v1 (dag-cbor, sha-256) for a value
+ * Matches CLI implementation for journal chain validation
+ */
+export async function computeCID(value) {
+  const cbor = cborEncode(value)
+  const hash = await crypto.subtle.digest('SHA-256', cbor)
+
+  // CID v1: version(1) + codec(dag-cbor=0x71) + hash-type(sha256=0x12) + hash-len(32) + hash
+  const cid = new Uint8Array(2 + 2 + 32)
+  cid[0] = 0x01 // CID version 1
+  cid[1] = 0x71 // dag-cbor codec
+  cid[2] = 0x12 // sha2-256 hash
+  cid[3] = 0x20 // 32 bytes
+  cid.set(new Uint8Array(hash), 4)
+
+  // Encode as base32lower with 'b' prefix (multibase)
+  return 'b' + base32LowerEncode(cid)
 }
