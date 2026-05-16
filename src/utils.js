@@ -404,3 +404,91 @@ export async function computeCID(value) {
   // Encode as base32lower with 'b' prefix (multibase)
   return 'b' + base32LowerEncode(cid)
 }
+
+/**
+ * Parse CID string to bytes
+ */
+export function cidToBytes(cidStr) {
+  if (cidStr.startsWith('b')) {
+    return base32Decode(cidStr.slice(1))
+  }
+  throw new Error('Unsupported CID format: ' + cidStr)
+}
+
+/**
+ * Base32 lowercase decoding (RFC 4648)
+ */
+function base32Decode(str) {
+  const result = []
+  let bits = 0
+  let value = 0
+
+  for (const char of str.toLowerCase()) {
+    const idx = B32_LOWER.indexOf(char)
+    if (idx === -1) continue
+
+    value = (value << 5) | idx
+    bits += 5
+
+    if (bits >= 8) {
+      bits -= 8
+      result.push((value >> bits) & 0xff)
+    }
+  }
+
+  return new Uint8Array(result)
+}
+
+/**
+ * Encode varint
+ */
+function encodeVarint(n) {
+  const bytes = []
+  while (n > 0x7f) {
+    bytes.push((n & 0x7f) | 0x80)
+    n >>>= 7
+  }
+  bytes.push(n & 0x7f)
+  return new Uint8Array(bytes)
+}
+
+/**
+ * Create a minimal CAR file for firehose
+ * CAR format: header(varint + cbor) + blocks(varint + cid + data)
+ * 
+ * @param {string} rootCid - Root CID (commit CID)
+ * @param {Array<{cid: string, data: Uint8Array}>} blocks - Blocks to include
+ * @returns {Uint8Array} CAR file bytes
+ */
+export function createCarFile(rootCid, blocks = []) {
+  const parts = []
+
+  // Create header
+  const header = cborEncode({
+    version: 1,
+    roots: [{ $link: rootCid }]
+  })
+  parts.push(encodeVarint(header.length))
+  parts.push(header)
+
+  // Add blocks
+  for (const block of blocks) {
+    const cidBytes = cidToBytes(block.cid)
+    const blockData = block.data instanceof Uint8Array ? block.data : cborEncode(block.data)
+
+    parts.push(encodeVarint(cidBytes.length + blockData.length))
+    parts.push(cidBytes)
+    parts.push(blockData)
+  }
+
+  // Concatenate all parts
+  const totalLength = parts.reduce((sum, p) => sum + p.length, 0)
+  const result = new Uint8Array(totalLength)
+  let offset = 0
+  for (const part of parts) {
+    result.set(part, offset)
+    offset += part.length
+  }
+
+  return result
+}

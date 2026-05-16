@@ -3,8 +3,14 @@
  * Streams events from journal
  */
 
-import { cborEncode } from './utils.js'
+import { cborEncode, createCarFile } from './utils.js'
 import { Journal } from './journal.js'
+
+// Frame types for WebSocket protocol
+const FrameType = {
+    Message: 1,
+    Error: -1
+}
 
 /**
  * Firehose Durable Object
@@ -52,6 +58,8 @@ export class Firehose {
             this.state.waitUntil(this.backfill(server, parseInt(cursor)))
         }
 
+        console.log(`New WebSocket client connected, cursor: ${cursor}`)
+
         return new Response(null, { status: 101, webSocket: client })
     }
 
@@ -87,6 +95,23 @@ export class Firehose {
             }
         } catch (e) {
             console.error('Backfill error:', e)
+            this.sendError(ws, 'InternalError', 'Failed to backfill events')
+        }
+    }
+
+    /**
+     * Send error frame to client
+     */
+    sendError(ws, error, message) {
+        try {
+            const errorFrame = {
+                op: FrameType.Error,
+                error,
+                message
+            }
+            ws.send(cborEncode(errorFrame))
+        } catch (e) {
+            console.error('Failed to send error frame:', e)
         }
     }
 
@@ -101,11 +126,14 @@ export class Firehose {
         const formattedEvents = filteredEvents.map(e => cborEncode(this.formatEvent(e)))
         const sockets = this.state.getWebSockets()
 
+        console.log(`Broadcasting ${filteredEvents.length} events to ${sockets.length} clients`)
+
         for (const ws of sockets) {
             for (const msg of formattedEvents) {
                 try {
                     ws.send(msg)
                 } catch (e) {
+                    console.error('Failed to send to client:', e)
                     // socket closed, will be removed by DO eventually
                 }
             }
@@ -116,6 +144,17 @@ export class Firehose {
      * Format event for firehose (AT Protocol compliant)
      */
     formatEvent(event) {
+        // Create CAR blocks with record data
+        const blocks = []
+
+        // Include record data if not a delete operation
+        if (event.op !== 'delete' && event.record) {
+            blocks.push({
+                cid: event.cid,
+                data: event.record
+            })
+        }
+
         return {
             $type: '#commit',
             seq: event.offset,
@@ -124,9 +163,9 @@ export class Firehose {
             tooBig: false,
             repo: event.did,
             commit: event.cid,
-            rev: String(event.offset),
-            since: event.prev,
-            blocks: new Uint8Array(0), // No CAR blocks in static model
+            rev: event.rev,
+            since: event.prevRev || null,
+            blocks: createCarFile(event.cid, blocks),
             ops: [{
                 action: event.op,
                 path: `${event.collection}/${event.rkey}`,
@@ -137,11 +176,13 @@ export class Firehose {
     }
 
     async webSocketMessage(ws, message) {
-        // Client shouldn't send messages
+        // Client shouldn't send messages for subscribeRepos
+        // But we should handle it gracefully
+        console.warn('Unexpected message from client')
     }
 
     async webSocketClose(ws, code, reason) {
-        // Cleanup handled by DO
+        console.log(`WebSocket client disconnected: ${code} ${reason}`)
     }
 
     async webSocketError(ws, error) {

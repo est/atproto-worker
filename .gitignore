@@ -28,3 +28,7 @@ coverage/
 *.lcov
 .nyc_output
 dist/
+
+atproto-interop-tests
+atproto-reference
+

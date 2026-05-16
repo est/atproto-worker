@@ -9,6 +9,33 @@ import { computeCID, cborEncode } from './crypto.js'
 
 const DEFAULT_JOURNAL_PATH = './journal.ndjson'
 
+// TID generation for rev field
+const B32_CHARSET = '234567abcdefghijklmnopqrstuvwxyz'
+let lastTimestamp = 0
+let clockSeq = 0
+
+function generateTID() {
+    let timestamp = Date.now() * 1000
+
+    if (timestamp === lastTimestamp) {
+        clockSeq++
+    } else {
+        lastTimestamp = timestamp
+        clockSeq = 0
+    }
+
+    const combined = BigInt(timestamp) << 10n | BigInt(clockSeq & 0x3ff)
+
+    let tid = ''
+    let n = combined
+    for (let i = 0; i < 13; i++) {
+        tid = B32_CHARSET[Number(n & 31n)] + tid
+        n >>= 5n
+    }
+
+    return tid
+}
+
 /**
  * Journal writer for appending events
  */
@@ -16,8 +43,9 @@ export class JournalWriter {
     constructor(journalPath = DEFAULT_JOURNAL_PATH) {
         this.journalPath = journalPath
         this.prevCid = null
+        this.prevRev = null
 
-        // Load existing journal to get prev CID
+        // Load existing journal to get prev CID and rev
         if (fs.existsSync(journalPath)) {
             const content = fs.readFileSync(journalPath, 'utf-8').trim()
             if (content) {
@@ -26,6 +54,7 @@ export class JournalWriter {
                 if (lastLine) {
                     const lastEvent = JSON.parse(lastLine)
                     this.prevCid = lastEvent.cid
+                    this.prevRev = lastEvent.rev
                 }
             }
         }
@@ -48,11 +77,16 @@ export class JournalWriter {
     async append(event) {
         const offset = this.getOffset()
 
+        // Generate rev (TID format) - ensures monotonic increase
+        const rev = generateTID()
+
         // Add metadata
         const fullEvent = {
             offset,
             ...event,
+            rev,
             prev: this.prevCid,
+            prevRev: this.prevRev,
             time: new Date().toISOString()
         }
 
@@ -73,6 +107,7 @@ export class JournalWriter {
 
         // Update prev
         this.prevCid = fullEvent.cid
+        this.prevRev = rev
 
         return fullEvent
     }
