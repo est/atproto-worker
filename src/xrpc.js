@@ -167,7 +167,7 @@ function handleDescribeServer(url, did) {
  */
 async function handleSubscribeRepos(request, env, journal) {
     const upgradeHeader = request.headers.get('Upgrade')
-    if (!upgradeHeader || upgradeHeader !== 'websocket') {
+    if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
         return xrpcError(400, 'InvalidRequest', 'WebSocket upgrade required')
     }
 
@@ -191,13 +191,13 @@ async function handleSubscribeRepos(request, env, journal) {
  * com.atproto.sync.listRepos
  */
 function handleListRepos(did, journal) {
-    const currentSeq = journal.getCurrentSeq()
+    const latest = journal.events.length > 0 ? journal.events[journal.events.length - 1] : null
 
     return xrpcSuccess({
         repos: [{
             did,
-            head: journal.events.length > 0 ? journal.events[journal.events.length - 1].cid : null,
-            rev: String(currentSeq)
+            head: latest ? latest.cid : null,
+            rev: latest ? latest.rev : null
         }]
     })
 }
@@ -220,6 +220,6 @@ function handleGetLatestCommit(url, journal, ownerDid) {
 
     return xrpcSuccess({
         cid: latest.cid,
-        rev: String(latest.offset)
+        rev: latest.rev
     })
 }
