@@ -45,9 +45,29 @@ export default {
 
             // Refresh endpoint - sync journal from HTTP source
             if (path === '/refresh') {
+                const lastCidBefore = journal.events.length > 0
+                    ? journal.events[journal.events.length - 1].cid
+                    : null
                 const oldEventCount = journal.events.length
+
                 const result = await journal.refresh()
-                const newEvents = journal.events.slice(oldEventCount)
+
+                // Find new events by matching last known CID
+                // This protects against non-append-only journals
+                let newEvents
+                if (lastCidBefore) {
+                    const lastIdx = journal.events.findIndex(e => e.cid === lastCidBefore)
+                    if (lastIdx === -1) {
+                        // Journal was completely rewritten - treat all as new
+                        // This shouldn't happen in append-only mode
+                        console.warn('Journal was rewritten (last CID not found), broadcasting all events')
+                        newEvents = journal.events
+                    } else {
+                        newEvents = journal.events.slice(lastIdx + 1)
+                    }
+                } else {
+                    newEvents = journal.events
+                }
 
                 // Broadcast new events to firehose
                 if (newEvents.length > 0) {
@@ -136,7 +156,6 @@ export default {
     async scheduled(controller, env, ctx) {
         const journal = new Journal(env)
         await journal.load()
-        const oldEventCount = journal.events.length
 
         const did = env.OWNER_DID
         const handle = env.OWNER_HANDLE
@@ -146,8 +165,25 @@ export default {
         // Optionally refresh journal on cron
         if (env.JOURNAL_URL) {
             try {
+                const lastCidBefore = journal.events.length > 0
+                    ? journal.events[journal.events.length - 1].cid
+                    : null
+
                 await journal.refresh()
-                const newEvents = journal.events.slice(oldEventCount)
+
+                // Find new events by matching last known CID
+                let newEvents
+                if (lastCidBefore) {
+                    const lastIdx = journal.events.findIndex(e => e.cid === lastCidBefore)
+                    if (lastIdx === -1) {
+                        console.warn('Journal was rewritten (last CID not found), broadcasting all events')
+                        newEvents = journal.events
+                    } else {
+                        newEvents = journal.events.slice(lastIdx + 1)
+                    }
+                } else {
+                    newEvents = journal.events
+                }
 
                 if (newEvents.length > 0) {
                     const id = env.FIREHOSE.idFromName('main')
