@@ -139,6 +139,30 @@ desc: 基于项目现状的完整评估与后续协作清单
 
 【中】当前 firehose 是一个“最小可推送 commit 消息”的实现，但文档措辞容易让人误以为已经完整兼容。比如 `#commit` 事件中 `blocks` 永远为空 [src/firehose.js](../src/src/firehose.js:118)，这对于需要真实 CAR blocks 的消费者并不充分。这个选择未必错误，但必须清楚标注为能力边界，而不是让使用者自行踩坑。
 
+
+#### 审查结论
+
+基于 atproto-reference 和 atproto-interop-tests 的审查，3-07 修复后 firehose 已达到**最小可用**状态，但仍有明确边界：
+
+**已修复**：
+- `rev`/`since` 使用 TID 格式（符合规范）
+- `blocks` 包含有效的 CAR 文件（含记录数据）
+- 支持 ErrorFrame 发送
+
+**能力边界（当前不支持）**：
+- blocks 只包含单个记录，**不包含 MST 树**
+- 不支持 `#sync` 事件类型
+- 不支持 `#identity` / `#account` 事件类型
+- 不支持背压控制（ConsumerTooSlow）
+- 不支持 CAR 文件完整性验证
+
+**兼容性预期**：
+- ✅ 可被 `unauthenticatedCommits: true` 的消费者接受
+- ✅ 可获取记录内容和操作类型
+- ❌ 无法验证 repo 完整性（需要 MST）
+- ❌ 无法用于 repo 同步（需要完整 CAR）
+
+完成时间：2025-05-16 02:00
 ### issue 3-09 README 与现状严重脱节，仓库不可自解释
 
 【中】README 目前几乎不能指导任何协作者落地运行，且内容和代码状态明显脱节。[README.md](../src/README.md:42) 仍然写着 “the actual code”，没有安装、配置、运行、部署、密钥管理、journal 发布、测试说明。另一个文档 [docs/Walkthrough.v2.md](../src/docs/Walkthrough.v2.md:34) 虽然更接近实现，但里面也有偏乐观的“已验证”表述。项目现在缺的不是更多零散说明，而是一份真实反映现状的主入口文档。
