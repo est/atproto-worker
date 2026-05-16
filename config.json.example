@@ -1,0 +1,7 @@
+{
+  "did": "did:web:example.com",
+  "handle": "example.com",
+  "privateKey": "",
+  "publicKey": "",
+  "publicKeyMultibase": ""
+}

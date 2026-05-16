@@ -21,14 +21,16 @@ tag = "v1"
 new_classes = ["Firehose"]
 
 [vars]
-# Your DID
+# Public configuration (not sensitive, safe in version control)
 OWNER_DID = "did:web:example.com"
-# Your handle
 OWNER_HANDLE = "example.com"
-# Your public key multibase (from seal.js)
+# Multibase public key - set after running `node cli/seal.js init`
 OWNER_PUBLIC_KEY = ""
 # URL to fetch journal from (for /refresh endpoint)
 JOURNAL_URL = ""
+
+# Note: PRIVATE_KEY is only used by the local CLI (cli/seal.js), not by the Worker.
+# It lives in config.json locally and must NEVER be committed or deployed as an env var.
 
 # Development overrides
 [env.dev.vars]

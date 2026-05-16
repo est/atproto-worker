@@ -93,8 +93,12 @@ async function init() {
     console.log(`  Public Key: ${publicKey.slice(0, 16)}...`)
     console.log(`  Multibase: ${config.publicKeyMultibase.slice(0, 20)}...`)
     console.log('')
-    console.log('Config saved to config.json')
-    console.log('KEEP config.json SECRET - it contains your private key!')
+    console.log('Config saved to config.json (local only, already in .gitignore)')
+    console.log('')
+    console.log('Next steps for deployment:')
+    console.log(`  wrangler secret put PRIVATE_KEY       # paste: ${privateKey}`)
+    console.log(`  wrangler secret put OWNER_PUBLIC_KEY  # paste: ${config.publicKeyMultibase}`)
+    console.log('  # Then update OWNER_DID and OWNER_HANDLE in wrangler.toml or as secrets')
 }
 
 /**
@@ -120,9 +124,12 @@ async function rotateKey() {
     console.log(`  New Public Key: ${publicKey.slice(0, 16)}...`)
     console.log(`  New Multibase: ${config.publicKeyMultibase}`)
     console.log('')
-    console.log('Config updated in config.json')
-    console.log('IMPORTANT: You must update OWNER_PUBLIC_KEY in wrangler.toml and redeploy')
-    console.log('so that your DID document reflects the new key.')
+    console.log('Config updated in config.json (local only)')
+    console.log('')
+    console.log('Next steps for deployment:')
+    console.log(`  wrangler secret put PRIVATE_KEY       # paste: ${privateKey}`)
+    console.log(`  wrangler secret put OWNER_PUBLIC_KEY  # paste: ${config.publicKeyMultibase}`)
+    console.log('  # Then redeploy: wrangler deploy')
 }
 
 /**
