@@ -2,6 +2,10 @@
  * DID and identity handling for AT Protocol PDS
  */
 
+import { isValidDID } from './utils.js'
+
+export { isValidDID as validateDid } from './utils.js'
+
 /**
  * Generate .well-known/atproto-did response
  */
@@ -116,11 +120,4 @@ export async function resolveHandle(handle, ownerHandle, ownerDid) {
     return null
 }
 
-/**
- * Validate that a DID matches expected format
- */
-export function validateDid(did) {
-    if (!did || typeof did !== 'string' || did.length > 2048) return false
-    if (did.endsWith(':') || did.endsWith('%')) return false
-    return /^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$/.test(did)
-}
+

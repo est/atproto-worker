@@ -16,36 +16,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { generateKeypair, sign, publicKeyToMultibase, computeCID } from './crypto.js'
 import { JournalWriter } from './journal.js'
+import { generateTID } from '../src/shared.js'
 
 const CONFIG_PATH = './config.json'
 const JOURNAL_PATH = './journal.ndjson'
-
-// TID generation
-const B32_CHARSET = '234567abcdefghijklmnopqrstuvwxyz'
-let lastTimestamp = 0
-let clockSeq = 0
-
-function generateTID() {
-    let timestamp = Date.now() * 1000
-
-    if (timestamp === lastTimestamp) {
-        clockSeq++
-    } else {
-        lastTimestamp = timestamp
-        clockSeq = 0
-    }
-
-    const combined = BigInt(timestamp) << 10n | BigInt(clockSeq & 0x3ff)
-
-    let tid = ''
-    let n = combined
-    for (let i = 0; i < 13; i++) {
-        tid = B32_CHARSET[Number(n & 31n)] + tid
-        n >>= 5n
-    }
-
-    return tid
-}
 
 /**
  * Load or create config

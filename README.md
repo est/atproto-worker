@@ -89,8 +89,9 @@ JOURNAL_URL = "https://your-host/journal.ndjson"
 
 ```bash
 wrangler secret put PRIVATE_KEY            # from config.json
-wrangler secret put OWNER_PUBLIC_KEY       # multibase from init
 ```
+
+`OWNER_PUBLIC_KEY` is set in `wrangler.toml` (not a secret) — copy the multibase value from `config.json` after running `init`.
 
 ### 4. Deploy
 

@@ -3,7 +3,7 @@
  * Streams events from journal
  */
 
-import { cborEncode, createCarFile } from './utils.js'
+import { cborEncode, createCarFile } from './shared.js'
 import { Journal } from './journal.js'
 
 // Frame types for WebSocket protocol
@@ -142,19 +142,13 @@ export class Firehose {
 
     /**
      * Format event for firehose (AT Protocol compliant)
+     *
+     * blocks is an empty CAR file. The event CID is computed from
+     * {op, collection, rkey, record, prev} which doesn't match the
+     * atproto commit object schema, so including it as a CAR block
+     * would cause verification failures for consumers.
      */
     formatEvent(event) {
-        // Create CAR blocks with record data
-        const blocks = []
-
-        // Include record data if not a delete operation
-        if (event.op !== 'delete' && event.record) {
-            blocks.push({
-                cid: event.cid,
-                data: event.record
-            })
-        }
-
         return {
             $type: '#commit',
             seq: event.offset,
@@ -165,7 +159,7 @@ export class Firehose {
             commit: event.cid,
             rev: event.rev,
             since: event.prevRev || null,
-            blocks: createCarFile(event.cid, blocks),
+            blocks: createCarFile(event.cid, []),
             ops: [{
                 action: event.op,
                 path: `${event.collection}/${event.rkey}`,

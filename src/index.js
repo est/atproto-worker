@@ -142,7 +142,7 @@ export default {
             console.error('Request error:', e)
             return new Response(JSON.stringify({
                 error: 'InternalError',
-                message: e.message
+                message: 'An internal error occurred'
             }), {
                 status: 500,
                 headers: { 'Content-Type': 'application/json', ...corsHeaders }

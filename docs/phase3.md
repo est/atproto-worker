@@ -135,9 +135,9 @@ desc: 基于项目现状的完整评估与后续协作清单
 
 完成时间：2025-05-16 01:15
 
-### issue 3-08 firehose 输出是最小实现，但协议兼容性边界不清楚
-
-【中】当前 firehose 是一个“最小可推送 commit 消息”的实现，但文档措辞容易让人误以为已经完整兼容。比如 `#commit` 事件中 `blocks` 永远为空 [src/firehose.js](../src/src/firehose.js:118)，这对于需要真实 CAR blocks 的消费者并不充分。这个选择未必错误，但必须清楚标注为能力边界，而不是让使用者自行踩坑。
+#### issue 3-08 firehose 输出是最小实现，但协议兼容性边界不清楚
+#
+#【中】当前 firehose 是一个“最小可推送 commit 消息”的实现，但文档措辞容易让人误以为已经完整兼容。比如 `#commit` 事件中 `blocks` 永远为空 [src/firehose.js](../src/src/firehose.js:118)，这对于需要真实 CAR blocks 的消费者并不充分。这个选择未必错误，但必须清楚标注为能力边界，而不是让使用者自行踩坑。
 
 
 #### 审查结论
@@ -163,6 +163,7 @@ desc: 基于项目现状的完整评估与后续协作清单
 - ❌ 无法用于 repo 同步（需要完整 CAR）
 
 完成时间：2025-05-16 02:00
+
 ### issue 3-09 README 与现状严重脱节，仓库不可自解释
 
 【中】README 目前几乎不能指导任何协作者落地运行，且内容和代码状态明显脱节。[README.md](../src/README.md:42) 仍然写着 “the actual code”，没有安装、配置、运行、部署、密钥管理、journal 发布、测试说明。另一个文档 [docs/Walkthrough.v2.md](../src/docs/Walkthrough.v2.md:34) 虽然更接近实现，但里面也有偏乐观的“已验证”表述。项目现在缺的不是更多零散说明，而是一份真实反映现状的主入口文档。
@@ -176,3 +177,36 @@ desc: 基于项目现状的完整评估与后续协作清单
 - 区分了 did:web 和 did:plc 两种身份模式的行为差异。
 
 完成时间：2025-05-16 01:25
+
+### issue 3-10 协议兼容性和健壮性审查
+
+基于 atproto-reference 和 atproto-interop-tests 的审查，发现并修复了以下问题：
+
+#### Firehose 协议兼容性
+
+- [X] rev 字段：从数字字符串改为 TID 格式
+- [X] since 字段：从 CID 改为前一个 rev (TID)
+- [X] blocks 字段：实现 CAR 文件生成，包含记录数据
+- [X] 错误帧支持：添加 ErrorFrame 发送能力
+
+#### XRPC 端点兼容性
+
+- [X] listRepos.rev：使用 TID 格式
+- [X] getLatestCommit.rev：使用 TID 格式
+- [X] subscribeRepos：修复 WebSocket 升级头检查（大小写不敏感）
+
+#### 健壮性改进
+
+- [X] 添加 WebSocket 连接日志
+- [X] 添加广播事件日志
+- [X] 添加错误帧发送能力
+- [X] 改进错误处理和日志记录
+
+#### 已知限制
+
+- blocks 字段虽然是有效的 CAR 文件，但只包含单个记录，不包含 MST 树
+- 没有实现 CAR 文件的完整验证
+- 没有实现背压控制
+- 没有实现重连机制（依赖客户端重连）
+
+完成时间：2025-05-16 02:00
