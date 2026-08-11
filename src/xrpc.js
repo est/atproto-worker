@@ -3,7 +3,8 @@
  * Read-only from journal, no write operations on worker
  */
 
-import { resolveHandle } from './did.js'
+import { resolveHandle, generateDidWebDocument } from './did.js'
+import { createCarFile } from './shared.js'
 
 function xrpcError(status, error, message) {
     return new Response(JSON.stringify({ error, message }), {
@@ -47,6 +48,15 @@ export async function handleXrpc(request, { journal, did, handle, env }) {
 
         case 'com.atproto.sync.getLatestCommit':
             return handleGetLatestCommit(url, journal, did)
+
+        case 'com.atproto.sync.getRepoStatus':
+            return handleGetRepoStatus(url, journal, did)
+
+        case 'com.atproto.sync.getRepo':
+            return handleGetRepo(url, journal, did)
+
+        case 'com.atproto.repo.describeRepo':
+            return handleDescribeRepo(url, journal, handle, did, env)
 
         case '_health':
             return handleHealth(journal)
@@ -221,5 +231,94 @@ function handleGetLatestCommit(url, journal, ownerDid) {
     return xrpcSuccess({
         cid: latest.cid,
         rev: latest.rev
+    })
+}
+
+/**
+ * com.atproto.sync.getRepoStatus
+ * Hosting status for a repository on this server.
+ */
+function handleGetRepoStatus(url, journal, ownerDid) {
+    const repoDid = url.searchParams.get('did')
+
+    if (repoDid !== ownerDid) {
+        return xrpcError(400, 'InvalidRequest', 'Can only get status of repos on this PDS')
+    }
+
+    const latest = journal.events.length > 0 ? journal.events[journal.events.length - 1] : null
+
+    return xrpcSuccess({
+        did: repoDid,
+        active: true,
+        rev: latest ? latest.rev : null
+    })
+}
+
+/**
+ * com.atproto.sync.getRepo
+ * Download repository export as CAR file.
+ * NOTE: blocks are currently empty (see ADR-006) - the export contains
+ * the commit root but no data blocks, so consumers needing full repo
+ * data (like relays) cannot index records from it yet.
+ */
+function handleGetRepo(url, journal, ownerDid) {
+    const repoDid = url.searchParams.get('did')
+
+    if (repoDid !== ownerDid) {
+        return xrpcError(400, 'InvalidRequest', 'Can only get repos on this PDS')
+    }
+
+    if (journal.events.length === 0) {
+        return xrpcError(404, 'RepoNotFound', 'No commits found')
+    }
+
+    const latest = journal.events[journal.events.length - 1]
+    const car = createCarFile(latest.cid, [])
+
+    return new Response(car, {
+        status: 200,
+        headers: {
+            'Content-Type': 'application/vnd.ipld.car',
+            'Content-Disposition': `attachment; filename=${repoDid}.car`
+        }
+    })
+}
+
+/**
+ * com.atproto.repo.describeRepo
+ * Get information about the account and repository.
+ */
+function handleDescribeRepo(url, journal, ownerHandle, ownerDid, env) {
+    const repo = url.searchParams.get('repo')
+
+    if (!repo) {
+        return xrpcError(400, 'InvalidRequest', 'repo is required')
+    }
+
+    // Resolve handle or DID to our DID
+    if (repo.startsWith('did:')) {
+        if (repo !== ownerDid) {
+            return xrpcError(400, 'InvalidRequest', 'Can only describe repos on this PDS')
+        }
+    } else if (repo !== ownerHandle) {
+        return xrpcError(400, 'InvalidRequest', 'Can only describe repos on this PDS')
+    }
+
+    const didDoc = generateDidWebDocument(
+        env.OWNER_HANDLE || url.hostname,
+        ownerHandle,
+        env.OWNER_PUBLIC_KEY,
+        ownerDid
+    )
+
+    // Collect distinct collections from journal
+    const collections = [...journal.byCollection.keys()]
+
+    return xrpcSuccess({
+        handle: ownerHandle,
+        did: ownerDid,
+        didDoc,
+        collections,
+        handleIsCorrect: true
     })
 }

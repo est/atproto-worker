@@ -47,6 +47,10 @@ export class Firehose {
         }
 
         const cursor = url.searchParams.get('cursor')
+        const cfConnectingIp = request.headers.get('CF-Connecting-IP') || 'unknown'
+        const userAgent = request.headers.get('User-Agent') || 'unknown'
+        console.log(`[firehose] WS connect from ${cfConnectingIp} (${userAgent}) cursor=${cursor} path=${url.pathname}`)
+
         const [client, server] = Object.values(new WebSocketPair())
 
         // Need to accept the server-side websocket via state to handle events

@@ -23,6 +23,13 @@ export default {
         const url = new URL(request.url)
         const path = url.pathname
 
+        // Log all incoming requests for debugging federation behavior
+        const cfConnectingIp = request.headers.get('CF-Connecting-IP') || 'unknown'
+        const userAgent = request.headers.get('User-Agent') || 'unknown'
+        if (path.startsWith('/xrpc/') || path.startsWith('/.well-known/')) {
+            console.log(`[req] ${request.method} ${path} from ${cfConnectingIp} (${userAgent})`)
+        }
+
         // CORS headers
         const corsHeaders = {
             'Access-Control-Allow-Origin': '*',
