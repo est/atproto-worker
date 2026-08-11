@@ -504,7 +504,7 @@ export function serializeNodeData(entries) {
     const prefixLen = countPrefixLen(lastKey, leaf.key)
     data.e.push({
       p: prefixLen,
-      k: leaf.key.slice(prefixLen),
+      k: new TextEncoder().encode(leaf.key.slice(prefixLen)),
       v: { $link: leaf.value },
       t: subtree,
     })

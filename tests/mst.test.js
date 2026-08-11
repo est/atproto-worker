@@ -136,6 +136,18 @@ test('car - createCar produces valid root', async () => {
   assert.strictEqual(car[1], 0xa2)
 })
 
+test('mst - matches official commit-proof fixtures', async () => {
+    const fs = await import('node:fs')
+    const fixtures = JSON.parse(fs.readFileSync('atproto-interop-tests/firehose/commit-proof-fixtures.json', 'utf8'))
+    for (const f of fixtures) {
+        const bs = new Map()
+        let mst = await MST.create(bs, [], 0)
+        for (const k of f.keys) mst = await mst.add(k, f.leafValue)
+        const root = await mst.getPointer()
+        assert.strictEqual(root, f.rootBeforeCommit, `fixture mismatch: ${f.comment}`)
+    }
+})
+
 test('mst - getLayer of non-empty tree', async () => {
   const bs = newBlockstore()
   const cid = await recordCid({ text: 'x' })
