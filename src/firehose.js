@@ -65,8 +65,12 @@ export class Firehose {
         this.state.acceptWebSocket(server)
         server.serializeAttachment({ cursor: cursor ? parseInt(cursor) : null })
 
-        // Backfill from journal
-        if (cursor !== null) {
+        // Backfill from journal: no cursor = new subscriber, send everything
+        // (matches relay expectations: a fresh host subscription gets the
+        // full history so it can index the repo without prior events)
+        if (cursor === null) {
+            this.state.waitUntil(this.backfill(server, -1))
+        } else if (cursor !== null) {
             this.state.waitUntil(this.backfill(server, parseInt(cursor)))
         }
 
@@ -211,9 +215,7 @@ export class Firehose {
 
     async webSocketClose(ws, code, reason) {
         console.log(`WebSocket client disconnected: ${code} ${reason}`)
-    }
-
-    async webSocketError(ws, error) {
+    }    async webSocketError(ws, error) {
         console.error('WebSocket error:', error)
     }
 }
