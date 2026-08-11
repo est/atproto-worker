@@ -113,10 +113,12 @@ export class Journal {
 
     /**
      * Validate journal chain integrity (CID chain and prev links)
+     * New format: commitCid chain + commit object CID. Legacy: event CID chain.
      * Throws on validation failure
      */
     async validate(events) {
         let prevCid = null
+        let prevCommitCid = null
 
         for (const event of events) {
             // Check prev chain
@@ -124,8 +126,21 @@ export class Journal {
                 throw new Error(`Journal chain broken at offset ${event.offset}: expected prev=${prevCid}, got ${event.prev}`)
             }
 
-            // Verify CID if present
-            if (event.cid) {
+            if (event.commitCid) {
+                // New format: verify commit CID matches the commit object
+                if (!event.commit) {
+                    throw new Error(`Missing commit object at offset ${event.offset}`)
+                }
+                const expectedCommitCid = await computeCID(event.commit)
+                if (event.commitCid !== expectedCommitCid) {
+                    throw new Error(`Commit CID mismatch at offset ${event.offset}: expected ${expectedCommitCid}, got ${event.commitCid}`)
+                }
+                if (event.commit.prev !== prevCommitCid) {
+                    throw new Error(`Commit chain broken at offset ${event.offset}: expected prev=${prevCommitCid}, got ${event.commit.prev}`)
+                }
+                prevCommitCid = event.commitCid
+            } else if (event.cid) {
+                // Legacy format: event CID chain
                 const expectedCid = await computeCID({
                     op: event.op,
                     collection: event.collection,
@@ -139,7 +154,7 @@ export class Journal {
                 }
             }
 
-            prevCid = event.cid
+            prevCid = event.commitCid || event.cid || null
         }
 
         return true

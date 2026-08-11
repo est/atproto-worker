@@ -6,6 +6,14 @@
 import { cborEncode, createCarFile } from './shared.js'
 import { Journal } from './journal.js'
 
+// Base64 (standard) -> Uint8Array (works in both CF Workers and Node.js)
+function base64ToBytes(b64) {
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return bytes
+}
+
 // Frame types for WebSocket protocol
 const FrameType = {
     Message: 1,
@@ -147,12 +155,34 @@ export class Firehose {
     /**
      * Format event for firehose (AT Protocol compliant)
      *
-     * blocks is an empty CAR file. The event CID is computed from
-     * {op, collection, rkey, record, prev} which doesn't match the
-     * atproto commit object schema, so including it as a CAR block
-     * would cause verification failures for consumers.
+     * New format: blocks is the real CAR built by the CLI (commit v3 +
+     * MST nodes + record), commit is the commit CID, ops carry record CIDs.
+     * Legacy format: empty CAR fallback (see ADR-006).
      */
     formatEvent(event) {
+        // New model: journal lines carry commitCid + blocksB64
+        if (event.commitCid && event.blocksB64) {
+            return {
+                $type: '#commit',
+                seq: event.offset,
+                time: event.time,
+                rebase: false,
+                tooBig: false,
+                repo: event.did,
+                commit: event.commitCid,
+                rev: event.rev,
+                since: event.prevRev || null,
+                blocks: base64ToBytes(event.blocksB64),
+                ops: [{
+                    action: event.op,
+                    path: `${event.collection}/${event.rkey}`,
+                    cid: event.op === 'delete' ? null : (event.recordCid || event.commitCid)
+                }],
+                blobs: []
+            }
+        }
+
+        // Legacy fallback: empty CAR
         return {
             $type: '#commit',
             seq: event.offset,

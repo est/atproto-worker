@@ -4,7 +4,14 @@
  */
 
 import { resolveHandle, generateDidWebDocument } from './did.js'
-import { createCarFile } from './shared.js'
+import { createCarFile, cborEncode, cidToBytes, encodeVarint, base32Encode } from './shared.js'
+
+function base64ToBytes(b64) {
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return bytes
+}
 
 function xrpcError(status, error, message) {
     return new Response(JSON.stringify({ error, message }), {
@@ -257,9 +264,8 @@ function handleGetRepoStatus(url, journal, ownerDid) {
 /**
  * com.atproto.sync.getRepo
  * Download repository export as CAR file.
- * NOTE: blocks are currently empty (see ADR-006) - the export contains
- * the commit root but no data blocks, so consumers needing full repo
- * data (like relays) cannot index records from it yet.
+ * New format: rebuilds full CAR from all per-commit blocks in the journal.
+ * Legacy fallback: empty CAR (see ADR-006).
  */
 function handleGetRepo(url, journal, ownerDid) {
     const repoDid = url.searchParams.get('did')
@@ -273,8 +279,23 @@ function handleGetRepo(url, journal, ownerDid) {
     }
 
     const latest = journal.events[journal.events.length - 1]
-    const car = createCarFile(latest.cid, [])
 
+    // New format: rebuild full CAR from per-commit CAR blocks
+    if (latest.commitCid && latest.blocksB64) {
+        const car = rebuildRepoCar(journal.events, latest.commitCid)
+        if (car) {
+            return new Response(car, {
+                status: 200,
+                headers: {
+                    'Content-Type': 'application/vnd.ipld.car',
+                    'Content-Disposition': `attachment; filename=${repoDid}.car`
+                }
+            })
+        }
+    }
+
+    // Legacy fallback: empty CAR with latest commit root
+    const car = createCarFile(latest.commitCid || latest.cid, [])
     return new Response(car, {
         status: 200,
         headers: {
@@ -282,6 +303,72 @@ function handleGetRepo(url, journal, ownerDid) {
             'Content-Disposition': `attachment; filename=${repoDid}.car`
         }
     })
+}
+
+/**
+ * Merge all per-commit CAR blocks from the journal into a single CAR
+ * rooted at the latest commit. Returns Uint8Array or null if undecodable.
+ */
+function rebuildRepoCar(events, rootCid) {
+    try {
+        const allBlocks = new Map()
+
+        for (const event of events) {
+            if (!event.blocksB64) continue
+            const carBytes = base64ToBytes(event.blocksB64)
+            // Parse CAR: header (varint len + CBOR), then blocks
+            let pos = 0
+            let headerLen = 0
+            let shift = 0
+            while (pos < carBytes.length) {
+                const b = carBytes[pos++]
+                headerLen |= (b & 0x7f) << shift
+                if (!(b & 0x80)) break
+                shift += 7
+            }
+            pos += headerLen
+            // blocks: [varint(len) cid+data]*
+            while (pos < carBytes.length) {
+                let blockLen = 0
+                let bShift = 0
+                while (pos < carBytes.length) {
+                    const b = carBytes[pos++]
+                    blockLen |= (b & 0x7f) << bShift
+                    if (!(b & 0x80)) break
+                    bShift += 7
+                }
+                if (blockLen <= 0 || pos + blockLen > carBytes.length) break
+                const block = carBytes.slice(pos, pos + blockLen)
+                pos += blockLen
+                const cidBytes = block.slice(0, 36)
+                const cidStr = 'b' + base32Encode(cidBytes)
+                allBlocks.set(cidStr, block.slice(36))
+            }
+        }
+
+        // Build final CAR
+        const parts = []
+        const header = cborEncode({ version: 1, roots: [{ $link: rootCid }] })
+        parts.push(encodeVarint(header.length))
+        parts.push(header)
+        for (const [cid, data] of allBlocks) {
+            const cidBytes = cidToBytes(cid)
+            parts.push(encodeVarint(cidBytes.length + data.length))
+            parts.push(cidBytes)
+            parts.push(data)
+        }
+        const total = parts.reduce((s, p) => s + p.length, 0)
+        const result = new Uint8Array(total)
+        let offset = 0
+        for (const part of parts) {
+            result.set(part, offset)
+            offset += part.length
+        }
+        return result
+    } catch (e) {
+        console.error('getRepo rebuild failed:', e.message)
+        return null
+    }
 }
 
 /**
