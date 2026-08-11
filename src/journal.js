@@ -64,24 +64,37 @@ export class Journal {
     }
 
     /**
-     * Refresh journal from HTTP source
+     * Refresh journal from static assets (self-hosted) or HTTP source
      * Validates chain integrity before accepting new data
      */
     async refresh() {
-        const url = this.env.JOURNAL_URL
-        if (!url) {
-            throw new Error('JOURNAL_URL not configured')
+        let content = null
+
+        // Prefer static assets: journal.ndjson is deployed with the Worker,
+        // so no loopback subrequest to our own domain is needed.
+        if (this.env.ASSETS) {
+            const resp = await this.env.ASSETS.fetch('https://worker/journal.ndjson')
+            if (resp.ok) {
+                content = await resp.text()
+            }
         }
 
-        const resp = await fetch(url, {
-            headers: { 'Accept': 'text/plain' }
-        })
+        // Fall back to external JOURNAL_URL
+        if (!content && this.env.JOURNAL_URL) {
+            const resp = await fetch(this.env.JOURNAL_URL, {
+                headers: { 'Accept': 'text/plain' }
+            })
 
-        if (!resp.ok) {
-            throw new Error(`Failed to fetch journal: ${resp.status}`)
+            if (!resp.ok) {
+                throw new Error(`Failed to fetch journal: ${resp.status}`)
+            }
+
+            content = await resp.text()
         }
 
-        const content = await resp.text()
+        if (!content) {
+            throw new Error('No journal source available (ASSETS or JOURNAL_URL)')
+        }
         const newEvents = parseJournal(content)
 
         // Validate before accepting - preserves old data on failure

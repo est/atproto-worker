@@ -29,7 +29,7 @@ class_name = "Firehose"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["Firehose"]
+new_sqlite_classes = ["Firehose"]
 
 [vars]
 # Public configuration (not sensitive, safe in version control)
