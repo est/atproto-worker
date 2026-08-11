@@ -27,7 +27,7 @@ export class JournalWriter {
                 const lastLine = lines[lines.length - 1]
                 if (lastLine) {
                     const lastEvent = JSON.parse(lastLine)
-                    this.prevCid = lastEvent.cid
+                    this.prevCid = lastEvent.commitCid || lastEvent.cid
                     this.prevRev = lastEvent.rev
                 }
             }
@@ -47,12 +47,14 @@ export class JournalWriter {
 
     /**
      * Append a signed event to the journal
+     * The event carries either a legacy event `cid` (old model) or the
+     * atproto `commitCid` + `rev` (new model); rev is preserved if given.
      */
     async append(event) {
         const offset = this.getOffset()
 
-        // Generate rev (TID format) - ensures monotonic increase
-        const rev = generateTID()
+        // Preserve caller-provided rev (from commit v3); fall back to generated TID
+        const rev = event.rev || generateTID()
 
         // Add metadata
         const fullEvent = {
@@ -64,8 +66,8 @@ export class JournalWriter {
             time: new Date().toISOString()
         }
 
-        // Compute CID if not provided
-        if (!fullEvent.cid) {
+        // Compute legacy event CID only when requested (backwards compat)
+        if (fullEvent.cid === undefined && !fullEvent.commitCid) {
             fullEvent.cid = await computeCID({
                 op: fullEvent.op,
                 collection: fullEvent.collection,
@@ -79,8 +81,8 @@ export class JournalWriter {
         const line = JSON.stringify(fullEvent) + '\n'
         fs.appendFileSync(this.journalPath, line)
 
-        // Update prev
-        this.prevCid = fullEvent.cid
+        // Update prev chain: prefer commitCid if present (new model)
+        this.prevCid = fullEvent.commitCid || fullEvent.cid || null
         this.prevRev = rev
 
         return fullEvent
@@ -101,11 +103,15 @@ export class JournalWriter {
     }
 
     /**
-     * Validate journal integrity (CID chain)
+     * Validate journal integrity
+     * New format: verify commit v3 signature + commitCid chain + record CIDs
+     * Legacy format: verify event CID chain
      */
     async validate() {
         const events = this.readAll()
         let prevCid = null
+        let prevCommitCid = null
+        const { verifyCommitSig } = await import('./atproto.js')
 
         for (const event of events) {
             // Check prev chain
@@ -113,20 +119,38 @@ export class JournalWriter {
                 throw new Error(`Chain broken at offset ${event.offset}: expected prev=${prevCid}, got ${event.prev}`)
             }
 
-            // Verify CID
-            const expectedCid = await computeCID({
-                op: event.op,
-                collection: event.collection,
-                rkey: event.rkey,
-                record: event.record,
-                prev: event.prev
-            })
+            if (event.commitCid) {
+                // New format: commit v3
+                if (!event.commit) {
+                    throw new Error(`Missing commit object at offset ${event.offset}`)
+                }
+                // Verify commit CID matches
+                const { commitCid } = await import('./atproto.js')
+                const expectedCommitCid = await commitCid(event.commit)
+                if (event.commitCid !== expectedCommitCid) {
+                    throw new Error(`Commit CID mismatch at offset ${event.offset}: expected ${expectedCommitCid}, got ${event.commitCid}`)
+                }
+                // Verify signature (needs public key - done in seal validate with config)
+                if (event.commit.prev !== prevCommitCid) {
+                    throw new Error(`Commit chain broken at offset ${event.offset}: expected prev=${prevCommitCid}, got ${event.commit.prev}`)
+                }
+                prevCommitCid = event.commitCid
+            } else {
+                // Legacy format: event CID chain
+                const expectedCid = await computeCID({
+                    op: event.op,
+                    collection: event.collection,
+                    rkey: event.rkey,
+                    record: event.record,
+                    prev: event.prev
+                })
 
-            if (event.cid !== expectedCid) {
-                throw new Error(`CID mismatch at offset ${event.offset}: expected ${expectedCid}, got ${event.cid}`)
+                if (event.cid !== expectedCid) {
+                    throw new Error(`CID mismatch at offset ${event.offset}: expected ${expectedCid}, got ${event.cid}`)
+                }
             }
 
-            prevCid = event.cid
+            prevCid = event.commitCid || event.cid || null
         }
 
         return { valid: true, eventCount: events.length }

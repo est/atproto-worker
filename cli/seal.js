@@ -16,10 +16,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { generateKeypair, sign, publicKeyToMultibase, computeCID } from './crypto.js'
 import { JournalWriter } from './journal.js'
+import { RepoManager } from './repo.js'
+import { carToBase64 } from './atproto.js'
 import { generateTID } from '../src/shared.js'
 
 const CONFIG_PATH = './config.json'
 const JOURNAL_PATH = './journal.ndjson'
+const STATE_PATH = './.repo-state.json'
 
 /**
  * Load or create config
@@ -118,6 +121,7 @@ async function createPost(text) {
         process.exit(1)
     }
 
+    const repo = new RepoManager(config.did, config.privateKey, STATE_PATH)
     const journal = new JournalWriter(JOURNAL_PATH)
     const rkey = generateTID()
 
@@ -127,32 +131,38 @@ async function createPost(text) {
         createdAt: new Date().toISOString()
     }
 
-    // Create commit data
-    const commitData = {
+    // Apply write to repo -> commit v3 + blocks
+    const result = await repo.applyWrite({
+        action: 'create',
+        collection: 'app.bsky.feed.post',
+        rkey,
+        record
+    })
+
+    // Build firehose CAR (commit + MST nodes + record)
+    const car = await repo.buildCar(result.commitCid, result.newBlocks)
+    const carB64 = carToBase64(car)
+
+    // Append to journal with full atproto data
+    const event = await journal.append({
         op: 'create',
         collection: 'app.bsky.feed.post',
         rkey,
         record,
-        prev: journal.prevCid
-    }
-
-    // Compute CID
-    const cid = await computeCID(commitData)
-
-    // Sign the CID
-    const sig = await sign(cid, config.privateKey)
-
-    // Append to journal
-    const event = await journal.append({
-        ...commitData,
-        cid,
-        sig,
-        did: config.did
+        did: config.did,
+        rev: result.rev,
+        recordCid: result.recordCid,
+        commit: result.commit,
+        commitCid: result.commitCid,
+        mstRoot: result.mstRoot,
+        blocksB64: carB64
     })
 
     console.log('✓ Post created')
     console.log(`  URI: at://${config.did}/app.bsky.feed.post/${rkey}`)
-    console.log(`  CID: ${cid}`)
+    console.log(`  Record CID: ${result.recordCid}`)
+    console.log(`  Commit CID: ${result.commitCid}`)
+    console.log(`  MST root: ${result.mstRoot}`)
     console.log(`  Offset: ${event.offset}`)
 }
 
@@ -179,6 +189,7 @@ async function createLike(subjectUri, subjectCid) {
         process.exit(1)
     }
 
+    const repo = new RepoManager(config.did, config.privateKey, STATE_PATH)
     const journal = new JournalWriter(JOURNAL_PATH)
     const rkey = generateTID()
 
@@ -191,22 +202,26 @@ async function createLike(subjectUri, subjectCid) {
         createdAt: new Date().toISOString()
     }
 
-    const commitData = {
+    const result = await repo.applyWrite({
+        action: 'create',
+        collection: 'app.bsky.feed.like',
+        rkey,
+        record
+    })
+    const carB64 = carToBase64(await repo.buildCar(result.commitCid, result.newBlocks))
+
+    const event = await journal.append({
         op: 'create',
         collection: 'app.bsky.feed.like',
         rkey,
         record,
-        prev: journal.prevCid
-    }
-
-    const cid = await computeCID(commitData)
-    const sig = await sign(cid, config.privateKey)
-
-    const event = await journal.append({
-        ...commitData,
-        cid,
-        sig,
-        did: config.did
+        did: config.did,
+        rev: result.rev,
+        recordCid: result.recordCid,
+        commit: result.commit,
+        commitCid: result.commitCid,
+        mstRoot: result.mstRoot,
+        blocksB64: carB64
     })
 
     console.log('✓ Like created')
@@ -238,6 +253,7 @@ async function createRepost(subjectUri, subjectCid) {
         process.exit(1)
     }
 
+    const repo = new RepoManager(config.did, config.privateKey, STATE_PATH)
     const journal = new JournalWriter(JOURNAL_PATH)
     const rkey = generateTID()
 
@@ -250,22 +266,26 @@ async function createRepost(subjectUri, subjectCid) {
         createdAt: new Date().toISOString()
     }
 
-    const commitData = {
+    const result = await repo.applyWrite({
+        action: 'create',
+        collection: 'app.bsky.feed.repost',
+        rkey,
+        record
+    })
+    const carB64 = carToBase64(await repo.buildCar(result.commitCid, result.newBlocks))
+
+    const event = await journal.append({
         op: 'create',
         collection: 'app.bsky.feed.repost',
         rkey,
         record,
-        prev: journal.prevCid
-    }
-
-    const cid = await computeCID(commitData)
-    const sig = await sign(cid, config.privateKey)
-
-    const event = await journal.append({
-        ...commitData,
-        cid,
-        sig,
-        did: config.did
+        did: config.did,
+        rev: result.rev,
+        recordCid: result.recordCid,
+        commit: result.commit,
+        commitCid: result.commitCid,
+        mstRoot: result.mstRoot,
+        blocksB64: carB64
     })
 
     console.log('✓ Repost created')
@@ -284,6 +304,7 @@ async function createFollow(subjectDid) {
         process.exit(1)
     }
 
+    const repo = new RepoManager(config.did, config.privateKey, STATE_PATH)
     const journal = new JournalWriter(JOURNAL_PATH)
     const rkey = generateTID()
 
@@ -293,22 +314,26 @@ async function createFollow(subjectDid) {
         createdAt: new Date().toISOString()
     }
 
-    const commitData = {
+    const result = await repo.applyWrite({
+        action: 'create',
+        collection: 'app.bsky.graph.follow',
+        rkey,
+        record
+    })
+    const carB64 = carToBase64(await repo.buildCar(result.commitCid, result.newBlocks))
+
+    const event = await journal.append({
         op: 'create',
         collection: 'app.bsky.graph.follow',
         rkey,
         record,
-        prev: journal.prevCid
-    }
-
-    const cid = await computeCID(commitData)
-    const sig = await sign(cid, config.privateKey)
-
-    const event = await journal.append({
-        ...commitData,
-        cid,
-        sig,
-        did: config.did
+        did: config.did,
+        rev: result.rev,
+        recordCid: result.recordCid,
+        commit: result.commit,
+        commitCid: result.commitCid,
+        mstRoot: result.mstRoot,
+        blocksB64: carB64
     })
 
     console.log('✓ Follow created')
@@ -317,15 +342,45 @@ async function createFollow(subjectDid) {
 }
 
 /**
- * Validate journal
+ * Validate journal (chain integrity + commit signatures)
  */
 async function validate() {
+    const config = loadConfig()
     const journal = new JournalWriter(JOURNAL_PATH)
 
     try {
-        const result = await journal.validate()
+        const events = journal.readAll()
+        const { verifyCommitSig, recordCid } = await import('./atproto.js')
+
+        // Chain integrity
+        const chainResult = await journal.validate()
+        let sigErrors = 0
+
+        // Commit signature + record CID verification (new format)
+        for (const event of events) {
+            if (event.commitCid) {
+                const sigOk = await verifyCommitSig(event.commit, config.publicKey)
+                if (!sigOk) {
+                    sigErrors++
+                    console.error(`  ✗ Commit signature invalid at offset ${event.offset}`)
+                }
+                if (event.recordCid && event.record) {
+                    const expected = await recordCid(event.record)
+                    if (event.recordCid !== expected) {
+                        sigErrors++
+                        console.error(`  ✗ Record CID mismatch at offset ${event.offset}`)
+                    }
+                }
+            }
+        }
+
+        if (sigErrors > 0) {
+            throw new Error(`${sigErrors} signature/CID verification failure(s)`)
+        }
+
         console.log('✓ Journal is valid')
-        console.log(`  Events: ${result.eventCount}`)
+        console.log(`  Events: ${chainResult.eventCount}`)
+        console.log(`  Commits verified: ${events.filter(e => e.commitCid).length}`)
     } catch (e) {
         console.error('✗ Journal validation failed:', e.message)
         process.exit(1)
