@@ -1,25 +1,16 @@
 # atproto-worker
 
-A serverless AT Protocol publisher that maps static JSON in a git repo to atproto/bsky via WebSocket and XRPC.
-
-## Why
-
-[atproto](https://atproto.com) is a protocol for social network data portability. The official [self-hosting guide](https://atproto.com/guides/self-hosting) is heavyweight.
-
-This project takes a different approach: treat your repo data like a static site. Your journal is a signed append-only log (`journal.ndjson`), published as a static file. A Cloudflare Worker serves it via standard atproto endpoints.
-
-No database. No mutable state. Just static files and a stateless worker.
+A stateless AT Protocol publisher on Cloudflare Workers. Your journal is a signed append-only log (`journal.ndjson`); the Worker serves it via standard atproto endpoints. No database, no mutable state.
 
 ## Architecture
 
 ```
 ┌──────────────────┐      ┌──────────────────────┐
 │  Local CLI       │      │  Static Host         │
-│  Remote service  │─────▶│  (journal.ndjson)    │
-│  (cli/seal.js)   │      │                      │
-│  Signs & appends │      │  S3, GitHub Pages... │
+│  (cli/seal.js)   │─────▶│  (journal.ndjson)    │
+│  Signs & appends │      │  S3 / R2 / Pages     │
 └──────────────────┘      └──────────┬───────────┘
-                                     │ /refresh
+                                     │ /refresh or cron
                                      ▼
                          ┌───────────────────────┐
                          │  Cloudflare Worker    │
@@ -34,16 +25,16 @@ No database. No mutable state. Just static files and a stateless worker.
 ### Prerequisites
 
 - Node.js 19+
-- Cloudflare account (for deployment)
+- Cloudflare account
 
-### 1. Initialize
+### 1. Install & Initialize
 
 ```bash
 npm install
-node cli/seal.js init did:web:example.com example.com
+node cli/seal.js init did:web:yourdomain.com yourdomain.com
 ```
 
-This generates a keypair and saves to `config.json` (local only, gitignored).
+Generates a secp256k1 keypair. Saves to `config.json` (local only, gitignored).
 
 ### 2. Create content
 
@@ -59,7 +50,7 @@ node cli/seal.js follow did:plc:xxx
 npm run dev:local
 ```
 
-The worker starts at `http://localhost:8787`.
+Worker starts at `http://localhost:8787`.
 
 ### 4. Test
 
@@ -69,11 +60,19 @@ npm test
 
 ## Deployment
 
-### 1. Publish journal
+### 1. Create KV namespace
 
-Upload `journal.ndjson` to a static file host (S3, GitHub Pages, R2, etc.).
+```bash
+npx wrangler kv namespace create JOURNAL_KV
+```
 
-### 2. Configure worker
+Copy the returned ID into `wrangler.toml`.
+
+### 2. Publish journal
+
+Upload `journal.ndjson` to a static host (S3, GitHub Pages, R2, etc.).
+
+### 3. Configure worker
 
 Edit `wrangler.toml`:
 
@@ -81,31 +80,31 @@ Edit `wrangler.toml`:
 [vars]
 OWNER_DID = "did:web:yourdomain.com"      # or did:plc:xxx
 OWNER_HANDLE = "yourdomain.com"
-OWNER_PUBLIC_KEY = ""                      # from init output
+OWNER_PUBLIC_KEY = "zQ3sh..."             # from config.json after init
 JOURNAL_URL = "https://your-host/journal.ndjson"
 ```
 
-### 3. Set secrets
+### 4. Set secrets
 
 ```bash
-wrangler secret put PRIVATE_KEY            # from config.json
+wrangler secret put PRIVATE_KEY            # hex private key from config.json
 ```
 
-`OWNER_PUBLIC_KEY` is set in `wrangler.toml` (not a secret) — copy the multibase value from `config.json` after running `init`.
-
-### 4. Deploy
+### 5. Deploy
 
 ```bash
 npm run deploy
 ```
 
-### 5. Refresh
+### 6. Refresh
 
-Trigger the worker to reload journal from static host:
+Reload journal from static host:
 
 ```bash
 curl https://your-worker.workers.dev/refresh
 ```
+
+Or wait for the cron (every 5 minutes).
 
 ## Endpoints
 
@@ -116,9 +115,11 @@ curl https://your-worker.workers.dev/refresh
 | `/.well-known/did.json` | DID document (did:web only) |
 | `/xrpc/com.atproto.repo.getRecord` | Get a record |
 | `/xrpc/com.atproto.repo.listRecords` | List records in collection |
-| `/xrpc/com.atproto.identity.resolveHandle` | Resolve handle to DID |
 | `/xrpc/com.atproto.sync.subscribeRepos` | WebSocket firehose |
-| `/xrpc/com.atproto.sync.getLatestCommit` | Latest commit CID |
+| `/xrpc/com.atproto.sync.getLatestCommit` | Latest commit CID & rev |
+| `/xrpc/com.atproto.sync.listRepos` | List repos |
+| `/xrpc/com.atproto.server.describeServer` | Server description |
+| `/xrpc/com.atproto.identity.resolveHandle` | Resolve handle to DID |
 | `/xrpc/_health` | Health check |
 | `/refresh` | Reload journal from static host |
 
@@ -137,10 +138,8 @@ node cli/seal.js list                    # List all records
 
 ## Identity Model
 
-The worker supports two identity modes:
-
-- **did:web**: `OWNER_DID=did:web:yourdomain.com` — DID document served at `/.well-known/did.json`
-- **did:plc**: `OWNER_DID=did:plc:xxx` — `did.json` returns 404 (document served by plc.directory)
+- **did:web**: `OWNER_DID=did:web:yourdomain.com` — DID document at `/.well-known/did.json`
+- **did:plc**: `OWNER_DID=did:plc:xxx` — `did.json` returns 404 (document at plc.directory)
 
 Both `/.well-known/atproto-did` and `/.well-known/did.json` return consistent identity.
 
@@ -148,25 +147,20 @@ Both `/.well-known/atproto-did` and `/.well-known/did.json` return consistent id
 
 - `config.json` contains your private key — never commit it
 - `journal.ndjson` contains signed events — gitignored by default
-- Worker reads keys from environment/secrets, not from files
+- Worker never holds or uses private keys (signing is CLI-only)
 - Journal chain is validated on load (CID integrity and prev links)
+- Private key uses secp256k1 (k256), matching atproto default
 
 ## Known Limitations
 
-- **Firehose**: `#commit` events have empty `blocks` — consumers needing real CAR data won't work
+- **Firehose**: `#commit` events have empty `blocks` — consumers needing full CAR data won't work
 - **Interactions**: Cron fetches likes/reposts but only logs them, no persistence yet
 - **Write operations**: XRPC write endpoints return 501 — use CLI for all writes
 - **Journal must be append-only**: Refresh assumes events are only appended, never reordered
 
 ## Project Status
 
-This is a working prototype. Core read path (XRPC, firehose, DID documents) is functional. Write path (CLI signing, journal append) is functional. Tests pass.
-
-Not yet suitable for production without:
-- Persistent interaction storage
-- Full CAR block support in firehose
-- Comprehensive error handling
-- Rate limiting
+Working prototype. Core read path (XRPC, firehose, DID documents) and write path (CLI signing, journal append) are functional. Tests pass including atproto interop tests (CID/CBOR encoding, handle/DID syntax).
 
 ## License
 

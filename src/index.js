@@ -9,7 +9,7 @@
 import { Journal } from './journal.js'
 import { handleXrpc } from './xrpc.js'
 import { handleAtprotoDid, handleDidJson } from './did.js'
-import { syncInteractions, syncFollowers } from './interactions.js'
+import { syncInteractions } from './interactions.js'
 
 // Re-export Durable Object
 export { Firehose } from './firehose.js'
@@ -48,7 +48,6 @@ export default {
                 const lastCidBefore = journal.events.length > 0
                     ? journal.events[journal.events.length - 1].cid
                     : null
-                const oldEventCount = journal.events.length
 
                 const result = await journal.refresh()
 

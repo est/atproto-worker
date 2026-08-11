@@ -32,4 +32,4 @@ dist/
 atproto-interop-tests
 atproto-reference
 .mimocode
-
+*.sublime-*
