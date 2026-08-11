@@ -34,3 +34,4 @@ atproto-interop-tests
 atproto-reference
 .mimocode
 *.sublime-*
+.repo-state.json

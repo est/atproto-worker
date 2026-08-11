@@ -145,6 +145,8 @@ export function cborEncode(value) {
         chunks.push(new Uint8Array([0x00]))
         chunks.push(cidBytes)
       } else {
+        // atproto's CBOR (via cborg) sorts keys by length first, then
+        // lexicographically - matches the reference impl exactly
         const keys = Object.keys(val).sort((a, b) => {
           if (a.length !== b.length) return a.length - b.length
           return a < b ? -1 : 1
