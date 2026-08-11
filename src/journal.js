@@ -28,7 +28,8 @@ export class Journal {
     }
 
     /**
-     * Load journal from KV storage (cached) or initial env
+     * Load journal from KV storage (cached), static assets, or initial env
+     * Order: KV cache → ASSETS binding → JOURNAL_CONTENT (local dev)
      */
     async load() {
         if (this.loaded) return
@@ -37,6 +38,14 @@ export class Journal {
         let content = null
         if (this.env.JOURNAL_KV) {
             content = await this.env.JOURNAL_KV.get('journal')
+        }
+
+        // Fall back to static assets (journal.ndjson deployed with the Worker)
+        if (!content && this.env.ASSETS) {
+            const resp = await this.env.ASSETS.fetch('https://worker/journal.ndjson')
+            if (resp.ok) {
+                content = await resp.text()
+            }
         }
 
         // Fall back to inline content if provided

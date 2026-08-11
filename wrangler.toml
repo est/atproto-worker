@@ -1,7 +1,8 @@
 name = "atproto-worker"
 main = "src/index.js"
-compatibility_date = "2026-07-07"
-compatibility_flags = ["websocket_hibernation"]
+compatibility_date = "2025-07-18"
+# websocket_hibernation is enabled by default since 2024-04-03;
+# the explicit flag name was removed in newer runtimes.
 
 # Cron for interaction sync
 [triggers]
@@ -12,7 +13,14 @@ crons = ["*/5 * * * *"]
 # Then replace the id below with the returned namespace ID.
 [[kv_namespaces]]
 binding = "JOURNAL_KV"
-id = "your-kv-namespace-id"
+id = "3414327b849649a0befbb5aeb26a95cd"
+
+# Static assets: journal.ndjson is deployed with the Worker.
+# JOURNAL_URL points back to this Worker's own /journal.ndjson,
+# so the whole setup is self-contained (no external static hosting).
+[assets]
+directory = "./public"
+binding = "ASSETS"
 
 # Durable Object for WebSocket subscriptions
 [[durable_objects.bindings]]
@@ -25,19 +33,21 @@ new_classes = ["Firehose"]
 
 [vars]
 # Public configuration (not sensitive, safe in version control)
-OWNER_DID = "did:web:example.com"
-OWNER_HANDLE = "example.com"
-# Multibase public key - set after running `node cli/seal.js init`
-OWNER_PUBLIC_KEY = ""
-# URL to fetch journal from (for /refresh endpoint)
-JOURNAL_URL = ""
+# Set after running `node cli/seal.js init`
+OWNER_DID = "did:web:atproto-worker.yiesty.workers.dev"
+OWNER_HANDLE = "atproto-worker.yiesty.workers.dev"
+# Multibase public key from config.json (after init)
+OWNER_PUBLIC_KEY = "zQ3shZXSYEFob9hKne1G3igx7zS9b3s4H48nghqzKer2U3p34"
+# URL to fetch journal from (for /refresh endpoint).
+# With static assets enabled this points at this Worker's own /journal.ndjson.
+JOURNAL_URL = "https://atproto-worker.yiesty.workers.dev/journal.ndjson"
 
 # Note: PRIVATE_KEY is only used by the local CLI (cli/seal.js), not by the Worker.
 # It lives in config.json locally and must NEVER be committed or deployed as an env var.
+# The Worker only ever needs the public key (OWNER_PUBLIC_KEY above). No secrets required.
 
 # Development overrides
 [env.dev.vars]
-OWNER_DID = "did:web:example.com"
-OWNER_HANDLE = "example.com"
-OWNER_PUBLIC_KEY = "zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF"
-# For local dev, journal is loaded from file
+OWNER_DID = "did:web:localhost"
+OWNER_HANDLE = "localhost"
+# Local dev journal is loaded from file via JOURNAL_CONTENT (npm run dev:local)

@@ -1,6 +1,7 @@
 # === Secrets & sensitive data ===
 config.json
 journal.ndjson
+!public/journal.ndjson
 .env
 .env.*
 !.env.example

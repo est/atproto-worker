@@ -10,6 +10,7 @@ import { Journal } from './journal.js'
 import { handleXrpc } from './xrpc.js'
 import { handleAtprotoDid, handleDidJson } from './did.js'
 import { syncInteractions } from './interactions.js'
+import { renderChecklistPage } from './setup.js'
 
 // Re-export Durable Object
 export { Firehose } from './firehose.js'
@@ -98,25 +99,30 @@ export default {
             else if (path.startsWith('/xrpc/')) {
                 response = await handleXrpc(request, { journal, did, handle, env })
             }
-            // Root info
+            // Root: deployment checklist page (HTML) or server info (JSON)
             else if (path === '/') {
-                response = new Response(JSON.stringify({
-                    name: 'atproto-worker',
-                    description: 'Event-Sourced AT Protocol Publisher',
-                    did,
-                    handle,
-                    journal: {
-                        events: journal.events.length,
-                        currentSeq: journal.getCurrentSeq()
-                    },
-                    endpoints: {
-                        xrpc: '/xrpc/',
-                        refresh: '/refresh',
-                        atprotoDid: '/.well-known/atproto-did'
-                    }
-                }, null, 2), {
-                    headers: { 'Content-Type': 'application/json' }
-                })
+                const wantsJson = (request.headers.get('Accept') || '').includes('application/json')
+                if (!wantsJson) {
+                    response = renderChecklistPage(env, journal, url.host)
+                } else {
+                    response = new Response(JSON.stringify({
+                        name: 'atproto-worker',
+                        description: 'Event-Sourced AT Protocol Publisher',
+                        did,
+                        handle,
+                        journal: {
+                            events: journal.events.length,
+                            currentSeq: journal.getCurrentSeq()
+                        },
+                        endpoints: {
+                            xrpc: '/xrpc/',
+                            refresh: '/refresh',
+                            atprotoDid: '/.well-known/atproto-did'
+                        }
+                    }, null, 2), {
+                        headers: { 'Content-Type': 'application/json' }
+                    })
+                }
             }
             else {
                 response = new Response('Not Found', { status: 404 })
