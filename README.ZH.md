@@ -6,19 +6,23 @@
 
 ```
 ┌──────────────────┐      ┌──────────────────────┐
-│  本地 CLI        │      │  静态托管             │
-│  (cli/seal.js)   │─────▶│  (journal.ndjson)    │
-│  签名并追加       │      │  S3 / R2 / Pages     │
-└──────────────────┘      └──────────┬───────────┘
-                                     │ /refresh 或 cron
-                                     ▼
-                         ┌───────────────────────┐
-                         │  Cloudflare Worker    │
-                         │  - XRPC API           │
-                         │  - WebSocket firehose │
-                         │  - DID 文档           │
-                         └───────────────────────┘
+│  本地 CLI        │─────▶│  Worker 静态资源     │
+│  (cli/seal.js)   │      │  (public/journal)    │
+│  签名并追加      │      └──────────┬───────────┘
+└──────────────────┘                 │ /refresh 或 cron
+                                    ▼
+                        ┌───────────────────────┐
+                        │  Cloudflare Worker    │
+                        │  - XRPC API           │
+                        │  - WebSocket firehose │
+                        │  - DID 文档           │
+                        │  - / 部署检查页       │
+                        └───────────────────────┘
 ```
+
+发帖流程：`seal.js post` 本地签名并追加到 `journal.ndjson` → 复制到
+`public/journal.ndjson` → 部署。Worker 通过 XRPC 提供读取、通过 firehose
+广播。无数据库、无持久状态、无需外部静态托管。
 
 ## 快速开始
 
@@ -60,34 +64,42 @@ npm test
 
 ## 部署
 
-### 1. 创建 KV 命名空间
+Worker 完全自包含：journal 作为静态资源（`public/journal.ndjson`）随 Worker 一起部署，无需外部静态托管。部署后访问 `https://<你的-worker>.<子域名>.workers.dev/` 可看到实时部署检查页，逐步引导完成所有配置。
+
+### 1. 初始化身份（本地，一次）
+
+```bash
+node cli/seal.js init did:web:你的-worker.子域名.workers.dev 你的-worker.子域名.workers.dev
+```
+
+生成 secp256k1 密钥对，保存到 `config.json`（仅本地，已 gitignore）。公钥填入 `wrangler.toml`；私钥永不离开你的机器。
+
+### 2. 配置 wrangler.toml
+
+```toml
+[assets]
+directory = "./public"
+
+[vars]
+OWNER_DID = "did:web:你的-worker.子域名.workers.dev"
+OWNER_HANDLE = "你的-worker.子域名.workers.dev"
+OWNER_PUBLIC_KEY = "zQ3sh..."        # init 后从 config.json 获取
+JOURNAL_URL = "https://你的-worker.子域名.workers.dev/journal.ndjson"
+```
+
+### 3. 创建 KV 命名空间
 
 ```bash
 npx wrangler kv namespace create JOURNAL_KV
 ```
 
-将返回的 ID 填入 `wrangler.toml`。
+将返回的 ID 填入 `wrangler.toml` 的 `[[kv_namespaces]]`。
 
-### 2. 发布 journal
-
-将 `journal.ndjson` 上传到静态托管（S3、GitHub Pages、R2 等）。
-
-### 3. 配置 Worker
-
-编辑 `wrangler.toml`：
-
-```toml
-[vars]
-OWNER_DID = "did:web:yourdomain.com"      # 或 did:plc:xxx
-OWNER_HANDLE = "yourdomain.com"
-OWNER_PUBLIC_KEY = "zQ3sh..."             # init 后从 config.json 获取
-JOURNAL_URL = "https://your-host/journal.ndjson"
-```
-
-### 4. 设置密钥
+### 4. 发布第一条帖子
 
 ```bash
-wrangler secret put PRIVATE_KEY            # config.json 中的 hex 私钥
+node cli/seal.js post "Hello from atproto-worker!"
+cp journal.ndjson public/journal.ndjson
 ```
 
 ### 5. 部署
@@ -98,19 +110,22 @@ npm run deploy
 
 ### 6. 刷新
 
-从静态托管重新加载 journal：
+从 Worker 自己的静态资源重新加载 journal：
 
 ```bash
-curl https://your-worker.workers.dev/refresh
+curl https://你的-worker.子域名.workers.dev/refresh
 ```
 
-或等待 cron 自动触发（每 5 分钟）。
+或等待 cron 自动触发（每 5 分钟）。`/` 页面的部署检查实时显示每一步的状态。
+
+> **无需任何 secret。** Worker 只读取公钥。没有 `wrangler secret put
+> PRIVATE_KEY` 这一步——私钥只存在于本地 `config.json`（ADR-005：仅本地签名）。
 
 ## 端点
 
 | 路径 | 说明 |
 |------|------|
-| `/` | 服务器信息（DID、handle、journal 统计） |
+| `/` | 部署检查页（实时配置状态）；`Accept: application/json` 返回服务器信息 |
 | `/.well-known/atproto-did` | 返回 owner DID |
 | `/.well-known/did.json` | DID 文档（仅 did:web） |
 | `/xrpc/com.atproto.repo.getRecord` | 获取单条记录 |
@@ -121,7 +136,8 @@ curl https://your-worker.workers.dev/refresh
 | `/xrpc/com.atproto.server.describeServer` | 服务器描述 |
 | `/xrpc/com.atproto.identity.resolveHandle` | Handle 解析为 DID |
 | `/xrpc/_health` | 健康检查 |
-| `/refresh` | 从静态托管重新加载 journal |
+| `/refresh` | 从 Worker 自身静态资源重新加载 journal |
+| `/journal.ndjson` | journal 静态资源本身 |
 
 ## CLI 命令
 
@@ -146,7 +162,8 @@ node cli/seal.js list                    # 列出所有记录
 ## 安全
 
 - `config.json` 包含私钥 — 绝不提交到 git
-- `journal.ndjson` 包含签名事件 — 默认已 gitignore
+- 根目录的 `journal.ndjson`（本地工作副本）已 gitignore；`public/journal.ndjson`
+  中的签名事件可安全提交（Worker 加载时会验证签名）
 - Worker 不持有也不使用私钥（签名仅在 CLI 完成）
 - Journal 加载时验证链完整性（CID 和 prev 链）
 - 私钥使用 secp256k1 (k256)，与 atproto 默认一致

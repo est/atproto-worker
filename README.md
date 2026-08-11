@@ -6,19 +6,24 @@ A stateless AT Protocol publisher on Cloudflare Workers. Your journal is a signe
 
 ```
 ┌──────────────────┐      ┌──────────────────────┐
-│  Local CLI       │      │  Static Host         │
-│  (cli/seal.js)   │─────▶│  (journal.ndjson)    │
-│  Signs & appends │      │  S3 / R2 / Pages     │
-└──────────────────┘      └──────────┬───────────┘
-                                     │ /refresh or cron
-                                     ▼
-                         ┌───────────────────────┐
-                         │  Cloudflare Worker    │
-                         │  - XRPC API           │
-                         │  - WebSocket firehose │
-                         │  - DID documents      │
-                         └───────────────────────┘
+│  Local CLI       │─────▶│  Worker Static Asset │
+│  (cli/seal.js)   │      │  (public/journal)    │
+│  Signs & appends │      └──────────┬───────────┘
+└──────────────────┘                 │ /refresh or cron
+                                    ▼
+                        ┌───────────────────────┐
+                        │  Cloudflare Worker    │
+                        │  - XRPC API           │
+                        │  - WebSocket firehose │
+                        │  - DID documents      │
+                        │  - / checklist page   │
+                        └───────────────────────┘
 ```
+
+Posting flow: `seal.js post` appends a signed event to `journal.ndjson`
+locally → copy it to `public/journal.ndjson` → deploy. The Worker then
+serves it via XRPC and broadcasts it over the firehose. No database, no
+mutable state, no external static hosting.
 
 ## Quick Start
 
@@ -60,34 +65,47 @@ npm test
 
 ## Deployment
 
-### 1. Create KV namespace
+The Worker is fully self-contained: the journal ships as a static asset
+(`public/journal.ndjson`), so no external static hosting is needed. After
+deploy, visit `https://<your-worker>.<subdomain>.workers.dev/` for a live
+checklist that walks you through each configuration step.
+
+### 1. Initialize identity (once, local)
+
+```bash
+node cli/seal.js init did:web:your-worker.subdomain.workers.dev your-worker.subdomain.workers.dev
+```
+
+Generates a secp256k1 keypair, saves it to `config.json` (local only,
+gitignored). The public key goes into `wrangler.toml`; the private key
+never leaves your machine.
+
+### 2. Configure wrangler.toml
+
+```toml
+[assets]
+directory = "./public"
+
+[vars]
+OWNER_DID = "did:web:your-worker.subdomain.workers.dev"
+OWNER_HANDLE = "your-worker.subdomain.workers.dev"
+OWNER_PUBLIC_KEY = "zQ3sh..."        # from config.json after init
+JOURNAL_URL = "https://your-worker.subdomain.workers.dev/journal.ndjson"
+```
+
+### 3. Create a KV namespace
 
 ```bash
 npx wrangler kv namespace create JOURNAL_KV
 ```
 
-Copy the returned ID into `wrangler.toml`.
+Copy the returned ID into `wrangler.toml` under `[[kv_namespaces]]`.
 
-### 2. Publish journal
-
-Upload `journal.ndjson` to a static host (S3, GitHub Pages, R2, etc.).
-
-### 3. Configure worker
-
-Edit `wrangler.toml`:
-
-```toml
-[vars]
-OWNER_DID = "did:web:yourdomain.com"      # or did:plc:xxx
-OWNER_HANDLE = "yourdomain.com"
-OWNER_PUBLIC_KEY = "zQ3sh..."             # from config.json after init
-JOURNAL_URL = "https://your-host/journal.ndjson"
-```
-
-### 4. Set secrets
+### 4. Publish your first post
 
 ```bash
-wrangler secret put PRIVATE_KEY            # hex private key from config.json
+node cli/seal.js post "Hello from atproto-worker!"
+cp journal.ndjson public/journal.ndjson
 ```
 
 ### 5. Deploy
@@ -98,19 +116,24 @@ npm run deploy
 
 ### 6. Refresh
 
-Reload journal from static host:
+Reload the journal (fetches from the Worker's own static asset):
 
 ```bash
-curl https://your-worker.workers.dev/refresh
+curl https://your-worker.subdomain.workers.dev/refresh
 ```
 
-Or wait for the cron (every 5 minutes).
+Or wait for the cron (every 5 minutes). The deployment checklist at `/`
+shows the live status of every step.
+
+> **No secrets needed.** The Worker only ever reads the public key. There
+> is no `wrangler secret put PRIVATE_KEY` step — the private key lives
+> exclusively in the local `config.json` (ADR-005: local signing only).
 
 ## Endpoints
 
 | Path | Description |
 |------|-------------|
-| `/` | Server info (DID, handle, journal stats) |
+| `/` | Deployment checklist page (live config status); JSON info with `Accept: application/json` |
 | `/.well-known/atproto-did` | Returns owner DID |
 | `/.well-known/did.json` | DID document (did:web only) |
 | `/xrpc/com.atproto.repo.getRecord` | Get a record |
@@ -121,7 +144,8 @@ Or wait for the cron (every 5 minutes).
 | `/xrpc/com.atproto.server.describeServer` | Server description |
 | `/xrpc/com.atproto.identity.resolveHandle` | Resolve handle to DID |
 | `/xrpc/_health` | Health check |
-| `/refresh` | Reload journal from static host |
+| `/refresh` | Reload journal from the Worker's own static asset |
+| `/journal.ndjson` | The journal static asset itself |
 
 ## CLI Commands
 
@@ -146,7 +170,9 @@ Both `/.well-known/atproto-did` and `/.well-known/did.json` return consistent id
 ## Security
 
 - `config.json` contains your private key — never commit it
-- `journal.ndjson` contains signed events — gitignored by default
+- The root `journal.ndjson` (local working copy) is gitignored; the signed
+  events in `public/journal.ndjson` are safe to commit (signatures are
+  verified by the Worker on load)
 - Worker never holds or uses private keys (signing is CLI-only)
 - Journal chain is validated on load (CID integrity and prev links)
 - Private key uses secp256k1 (k256), matching atproto default

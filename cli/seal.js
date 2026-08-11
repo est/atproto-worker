@@ -70,9 +70,11 @@ async function init() {
     console.log('Config saved to config.json (local only, already in .gitignore)')
     console.log('')
     console.log('Next steps for deployment:')
-    console.log(`  wrangler secret put PRIVATE_KEY       # paste: ${privateKey}`)
-    console.log(`  wrangler secret put OWNER_PUBLIC_KEY  # paste: ${config.publicKeyMultibase}`)
-    console.log('  # Then update OWNER_DID and OWNER_HANDLE in wrangler.toml or as secrets')
+    console.log(`  # 1. Copy the public key into wrangler.toml [vars]:`)
+    console.log(`  OWNER_PUBLIC_KEY = "${config.publicKeyMultibase}"`)
+    console.log('  # 2. Set OWNER_DID and OWNER_HANDLE in wrangler.toml to your did:web / handle')
+    console.log('  # 3. Deploy: npm run deploy')
+    console.log('  # The private key stays in config.json - the Worker never uses it.')
 }
 
 /**
@@ -101,9 +103,9 @@ async function rotateKey() {
     console.log('Config updated in config.json (local only)')
     console.log('')
     console.log('Next steps for deployment:')
-    console.log(`  wrangler secret put PRIVATE_KEY       # paste: ${privateKey}`)
-    console.log(`  wrangler secret put OWNER_PUBLIC_KEY  # paste: ${config.publicKeyMultibase}`)
-    console.log('  # Then redeploy: wrangler deploy')
+    console.log(`  # Update OWNER_PUBLIC_KEY in wrangler.toml [vars]:`)
+    console.log(`  OWNER_PUBLIC_KEY = "${config.publicKeyMultibase}"`)
+    console.log('  # Then redeploy: npm run deploy')
 }
 
 /**
