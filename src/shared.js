@@ -239,6 +239,19 @@ export function cborDecode(bytes) {
         }
         return obj
       }
+      case 6:
+        // dag-cbor tag 42 ($link): byte string containing CID
+        if (value === 42) {
+          const linkBytes = decode()
+          if (!(linkBytes instanceof Uint8Array)) {
+            throw new Error('CBOR tag 42 must be followed by a byte string')
+          }
+          // Strip optional identity multibase prefix (0x00), then encode as base32 CID
+          const prefix = linkBytes[0] === 0x00 ? 1 : 0
+          const cidBytes = linkBytes.slice(prefix)
+          return { $link: 'b' + base32Encode(cidBytes) }
+        }
+        throw new Error(`Unsupported CBOR tag: ${value}`)
       case 7:
         if (additional === 20) return false
         if (additional === 21) return true

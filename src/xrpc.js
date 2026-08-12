@@ -4,7 +4,7 @@
  */
 
 import { resolveHandle, generateDidWebDocument } from './did.js'
-import { createCarFile, cborEncode, cidToBytes, encodeVarint, base32Encode } from './shared.js'
+import { createCarFile, cborEncode, cborDecode, cidToBytes, encodeVarint, base32Encode } from './shared.js'
 
 function base64ToBytes(b64) {
     const bin = atob(b64)
@@ -306,69 +306,109 @@ function handleGetRepo(url, journal, ownerDid) {
 }
 
 /**
+ * Read a LEB128 varint from a byte array starting at `pos`.
+ * Throws if the varint is unterminated (EOF before the continuation bit clears).
+ */
+function readCarVarint(carBytes, pos) {
+    let value = 0
+    let shift = 0
+    while (true) {
+        if (pos >= carBytes.length) {
+            throw new Error('CAR varint is truncated: unexpected end of data')
+        }
+        const b = carBytes[pos++]
+        value |= (b & 0x7f) << shift
+        if (!(b & 0x80)) return { value, pos }
+        shift += 7
+        if (shift > 63) {
+            throw new Error('CAR varint is too long (exceeds 64-bit range)')
+        }
+    }
+}
+
+/**
  * Merge all per-commit CAR blocks from the journal into a single CAR
- * rooted at the latest commit. Returns Uint8Array or null if undecodable.
+ * rooted at the latest commit. Returns Uint8Array.
+ * @throws {Error} If any CAR data is malformed, truncated, or contains trailing garbage.
  */
 function rebuildRepoCar(events, rootCid) {
-    try {
-        const allBlocks = new Map()
+    const allBlocks = new Map()
 
-        for (const event of events) {
-            if (!event.blocksB64) continue
-            const carBytes = base64ToBytes(event.blocksB64)
-            // Parse CAR: header (varint len + CBOR), then blocks
-            let pos = 0
-            let headerLen = 0
-            let shift = 0
-            while (pos < carBytes.length) {
-                const b = carBytes[pos++]
-                headerLen |= (b & 0x7f) << shift
-                if (!(b & 0x80)) break
-                shift += 7
-            }
-            pos += headerLen
-            // blocks: [varint(len) cid+data]*
-            while (pos < carBytes.length) {
-                let blockLen = 0
-                let bShift = 0
-                while (pos < carBytes.length) {
-                    const b = carBytes[pos++]
-                    blockLen |= (b & 0x7f) << bShift
-                    if (!(b & 0x80)) break
-                    bShift += 7
-                }
-                if (blockLen <= 0 || pos + blockLen > carBytes.length) break
-                const block = carBytes.slice(pos, pos + blockLen)
-                pos += blockLen
-                const cidBytes = block.slice(0, 36)
-                const cidStr = 'b' + base32Encode(cidBytes)
-                allBlocks.set(cidStr, block.slice(36))
-            }
+    for (const event of events) {
+        if (!event.blocksB64) continue
+        const carBytes = base64ToBytes(event.blocksB64)
+
+        // --- CAR header: varint(headerLen) + CBOR header ---
+        const { value: headerLen, pos: afterHeaderVarint } = readCarVarint(carBytes, 0)
+        const headerEnd = afterHeaderVarint + headerLen
+        if (headerEnd > carBytes.length) {
+            throw new Error(
+                `CAR header is truncated: claims ${headerLen} bytes but only ${carBytes.length - afterHeaderVarint} remain`
+            )
         }
 
-        // Build final CAR
-        const parts = []
-        const header = cborEncode({ version: 1, roots: [{ $link: rootCid }] })
-        parts.push(encodeVarint(header.length))
-        parts.push(header)
-        for (const [cid, data] of allBlocks) {
-            const cidBytes = cidToBytes(cid)
-            parts.push(encodeVarint(cidBytes.length + data.length))
-            parts.push(cidBytes)
-            parts.push(data)
+        // Validate header is valid CBOR (catches corruption early)
+        try {
+            cborDecode(carBytes.slice(afterHeaderVarint, headerEnd))
+        } catch (e) {
+            throw new Error(`CAR header CBOR decode failed: ${e.message}`)
         }
-        const total = parts.reduce((s, p) => s + p.length, 0)
-        const result = new Uint8Array(total)
-        let offset = 0
-        for (const part of parts) {
-            result.set(part, offset)
-            offset += part.length
+
+        // --- Blocks: [varint(cidLen + dataLen) cidBytes data]* ---
+        let pos = headerEnd
+        while (pos < carBytes.length) {
+            const block = readCarVarint(carBytes, pos)
+            const blockLen = block.value
+            pos = block.pos
+            if (blockLen === 0) {
+                // A zero-length block marks the end of blocks (padding allowed after)
+                break
+            }
+            if (pos + blockLen > carBytes.length) {
+                throw new Error(
+                    `CAR block is truncated: header claims ${blockLen} bytes but only ${carBytes.length - pos} remain`
+                )
+            }
+            const blockBytes = carBytes.slice(pos, pos + blockLen)
+            pos += blockLen
+            if (blockBytes.length < 36) {
+                throw new Error('CAR block is too short to contain a CID')
+            }
+            const cidBytes = blockBytes.slice(0, 36)
+            const cidStr = 'b' + base32Encode(cidBytes)
+            allBlocks.set(cidStr, blockBytes.slice(36))
         }
-        return result
-    } catch (e) {
-        console.error('getRepo rebuild failed:', e.message)
-        return null
+
+        // Allow trailing zero padding; anything else is corruption
+        while (pos < carBytes.length) {
+            if (carBytes[pos] !== 0) {
+                throw new Error(
+                    `Unexpected trailing byte 0x${carBytes[pos].toString(16)} after CAR blocks at offset ${pos}`
+                )
+            }
+            pos++
+        }
     }
+
+    // Build final CAR
+    const parts = []
+    const header = cborEncode({ version: 1, roots: [{ $link: rootCid }] })
+    parts.push(encodeVarint(header.length))
+    parts.push(header)
+    for (const [cid, data] of allBlocks) {
+        const cidBytes = cidToBytes(cid)
+        parts.push(encodeVarint(cidBytes.length + data.length))
+        parts.push(cidBytes)
+        parts.push(data)
+    }
+    const total = parts.reduce((s, p) => s + p.length, 0)
+    const result = new Uint8Array(total)
+    let offset = 0
+    for (const part of parts) {
+        result.set(part, offset)
+        offset += part.length
+    }
+    return result
 }
 
 /**
