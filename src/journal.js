@@ -15,8 +15,8 @@ export function parseJournal(content) {
 
 /**
  * Journal state manager for worker
- * - Reads from local file (via KV or env)
- * - Syncs from HTTP on /refresh call
+ * - Reads from static assets (ASSETS binding) or inline JOURNAL_CONTENT
+ * - Syncs from ASSETS on /refresh call
  */
 export class Journal {
     constructor(env) {
@@ -28,20 +28,16 @@ export class Journal {
     }
 
     /**
-     * Load journal from KV storage (cached), static assets, or initial env
-     * Order: KV cache → ASSETS binding → JOURNAL_CONTENT (local dev)
+     * Load journal from static assets or inline content
+     * Order: ASSETS binding → JOURNAL_CONTENT (local dev)
      */
     async load() {
         if (this.loaded) return
 
-        // Try KV cache first
         let content = null
-        if (this.env.JOURNAL_KV) {
-            content = await this.env.JOURNAL_KV.get('journal')
-        }
 
-        // Fall back to static assets (journal.ndjson deployed with the Worker)
-        if (!content && this.env.ASSETS) {
+        // Prefer static assets (journal.ndjson deployed with the Worker)
+        if (this.env.ASSETS) {
             const resp = await this.env.ASSETS.fetch('https://worker/journal.ndjson')
             if (resp.ok) {
                 content = await resp.text()
@@ -102,11 +98,6 @@ export class Journal {
 
         this.events = newEvents
         this.index()
-
-        // Cache in KV
-        if (this.env.JOURNAL_KV) {
-            await this.env.JOURNAL_KV.put('journal', content)
-        }
 
         return { eventCount: this.events.length }
     }

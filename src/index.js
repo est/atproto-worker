@@ -43,7 +43,18 @@ export default {
 
         // Initialize journal
         const journal = new Journal(env)
-        await journal.load()
+        try {
+            await journal.load()
+        } catch (e) {
+            console.error('Journal load failed:', e)
+            return new Response(JSON.stringify({
+                error: 'JournalLoadError',
+                message: `Failed to load journal: ${e.message}`
+            }), {
+                status: 500,
+                headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            })
+        }
 
         const did = env.OWNER_DID || `did:web:${url.host}`
         const handle = env.OWNER_HANDLE || url.host
@@ -213,5 +224,39 @@ export default {
 
         // Sync interactions (these go to separate KV, not journal)
         ctx.waitUntil(syncInteractions(journal, did, handle))
+
+        // Declare ourselves to the relay (like the reference PDS
+        // Crawlers.notifyOfUpdate, 20-min throttle). Lets the relay know
+        // we exist so it can subscribe and index our repo.
+        if (env.OWNER_HANDLE && env.JOURNAL_KV) {
+            ctx.waitUntil(notifyRelay(env))
+        }
+    }
+}
+
+const RELAY_CRAWL_URL = 'https://bsky.network/xrpc/com.atproto.sync.requestCrawl'
+const RELAY_NOTIFY_THROTTLE_MS = 20 * 60 * 1000 // 20 min
+
+/**
+ * POST com.atproto.sync.requestCrawl to the relay so it crawls our repo.
+ * Throttled via KV (last notification timestamp) to avoid spam.
+ */
+async function notifyRelay(env) {
+    try {
+        const now = Date.now()
+        const last = parseInt(await env.JOURNAL_KV.get('relay-notify-ts')) || 0
+        if (now - last < RELAY_NOTIFY_THROTTLE_MS) return
+
+        const resp = await fetch(RELAY_CRAWL_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hostname: env.OWNER_HANDLE })
+        })
+        console.log(`[relay] requestCrawl for ${env.OWNER_HANDLE}: ${resp.status}`)
+        if (resp.ok) {
+            await env.JOURNAL_KV.put('relay-notify-ts', String(now))
+        }
+    } catch (e) {
+        console.error('[relay] requestCrawl failed:', e.message)
     }
 }

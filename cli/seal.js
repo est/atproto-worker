@@ -155,6 +155,7 @@ async function createPost(text) {
         commit: result.commit,
         commitCid: result.commitCid,
         mstRoot: result.mstRoot,
+        prevMstRoot: result.prevMstRoot,
         blocksB64: carB64
     })
 
@@ -221,6 +222,7 @@ async function createLike(subjectUri, subjectCid) {
         commit: result.commit,
         commitCid: result.commitCid,
         mstRoot: result.mstRoot,
+        prevMstRoot: result.prevMstRoot,
         blocksB64: carB64
     })
 
@@ -285,6 +287,7 @@ async function createRepost(subjectUri, subjectCid) {
         commit: result.commit,
         commitCid: result.commitCid,
         mstRoot: result.mstRoot,
+        prevMstRoot: result.prevMstRoot,
         blocksB64: carB64
     })
 
@@ -333,6 +336,7 @@ async function createFollow(subjectDid) {
         commit: result.commit,
         commitCid: result.commitCid,
         mstRoot: result.mstRoot,
+        prevMstRoot: result.prevMstRoot,
         blocksB64: carB64
     })
 

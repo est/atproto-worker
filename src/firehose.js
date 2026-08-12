@@ -14,12 +14,6 @@ function base64ToBytes(b64) {
     return bytes
 }
 
-// Frame types for WebSocket protocol
-const FrameType = {
-    Message: 1,
-    Error: -1
-}
-
 /**
  * Firehose Durable Object
  */
@@ -97,7 +91,7 @@ export class Firehose {
                 const message = this.formatEvent(event)
 
                 try {
-                    ws.send(cborEncode(message))
+                    ws.send(message)
                 } catch (e) {
                     return // Client disconnected
                 }
@@ -116,16 +110,11 @@ export class Firehose {
     }
 
     /**
-     * Send error frame to client
+     * Send error frame to client (header {op:-1} + body {error, message})
      */
     sendError(ws, error, message) {
         try {
-            const errorFrame = {
-                op: FrameType.Error,
-                error,
-                message
-            }
-            ws.send(cborEncode(errorFrame))
+            ws.send(this.sendErrorFrame(error, message))
         } catch (e) {
             console.error('Failed to send error frame:', e)
         }
@@ -139,7 +128,7 @@ export class Firehose {
         const filteredEvents = events.filter(e => e.did === this.env.OWNER_DID)
         if (filteredEvents.length === 0) return
 
-        const formattedEvents = filteredEvents.map(e => cborEncode(this.formatEvent(e)))
+        const formattedEvents = filteredEvents.map(e => this.formatEvent(e))
         const sockets = this.state.getWebSockets()
 
         console.log(`Broadcasting ${filteredEvents.length} events to ${sockets.length} clients`)
@@ -162,12 +151,16 @@ export class Firehose {
      * New format: blocks is the real CAR built by the CLI (commit v3 +
      * MST nodes + record), commit is the commit CID, ops carry record CIDs.
      * Legacy format: empty CAR fallback (see ADR-006).
+     *
+     * NOTE: subscribeRepos frames are CBOR(header) + CBOR(body), where
+     * header = {op: 1 (Message), t: "#commit"}. The body carries the
+     * event payload. Sending only the body breaks relay parsing.
      */
     formatEvent(event) {
+        let body
         // New model: journal lines carry commitCid + blocksB64
         if (event.commitCid && event.blocksB64) {
-            return {
-                $type: '#commit',
+            body = {
                 seq: event.offset,
                 time: event.time,
                 rebase: false,
@@ -176,6 +169,7 @@ export class Firehose {
                 commit: event.commitCid,
                 rev: event.rev,
                 since: event.prevRev || null,
+                prevData: event.prevMstRoot || null,
                 blocks: base64ToBytes(event.blocksB64),
                 ops: [{
                     action: event.op,
@@ -184,27 +178,46 @@ export class Firehose {
                 }],
                 blobs: []
             }
+        } else {
+            // Legacy fallback: empty CAR
+            body = {
+                seq: event.offset,
+                time: event.time,
+                rebase: false,
+                tooBig: false,
+                repo: event.did,
+                commit: event.cid,
+                rev: event.rev,
+                since: event.prevRev || null,
+                blocks: createCarFile(event.cid, []),
+                ops: [{
+                    action: event.op,
+                    path: `${event.collection}/${event.rkey}`,
+                    cid: event.op === 'delete' ? null : event.cid
+                }],
+                blobs: []
+            }
         }
 
-        // Legacy fallback: empty CAR
-        return {
-            $type: '#commit',
-            seq: event.offset,
-            time: event.time,
-            rebase: false,
-            tooBig: false,
-            repo: event.did,
-            commit: event.cid,
-            rev: event.rev,
-            since: event.prevRev || null,
-            blocks: createCarFile(event.cid, []),
-            ops: [{
-                action: event.op,
-                path: `${event.collection}/${event.rkey}`,
-                cid: event.op === 'delete' ? null : event.cid
-            }],
-            blobs: []
-        }
+        // Frame = CBOR(header {op:1, t:'#commit'}) + CBOR(body)
+        const header = cborEncode({ op: 1, t: '#commit' })
+        const bodyBytes = cborEncode(body)
+        const frame = new Uint8Array(header.length + bodyBytes.length)
+        frame.set(header, 0)
+        frame.set(bodyBytes, header.length)
+        return frame
+    }
+
+    /**
+     * Send error frame: CBOR(header {op:-1}) + CBOR({error, message})
+     */
+    sendErrorFrame(error, message) {
+        const header = cborEncode({ op: -1 })
+        const body = cborEncode({ error, message })
+        const frame = new Uint8Array(header.length + body.length)
+        frame.set(header, 0)
+        frame.set(body, header.length)
+        return frame
     }
 
     async webSocketMessage(ws, message) {

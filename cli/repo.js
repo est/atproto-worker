@@ -80,6 +80,7 @@ export class RepoManager {
 
     // Start from current MST or empty
     let mst = this.mst || await MST.create(this.blockstore, [], 0)
+    const prevMstRoot = this.mst ? await this.mst.getPointer() : null
 
     // Apply to MST
     if (action === 'delete') {
@@ -119,6 +120,7 @@ export class RepoManager {
     return {
       recordCid: recCid,
       mstRoot,
+      prevMstRoot,
       commit,
       commitCid: cid,
       rev,
