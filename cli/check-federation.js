@@ -11,6 +11,9 @@
  * 3. bsky appview resolveHandle (identity resolution)
  * 4. bsky appview getProfile (indexing - works only after relay indexes us)
  * 5. relay getRepoStatus (host/repo known to bsky.network)
+ *
+ * Requires either a direct network route to workers.dev/bsky endpoints
+ * or an HTTPS proxy via the standard env vars (https_proxy / http_proxy).
  */
 
 import fs from 'node:fs'
@@ -20,14 +23,38 @@ const WORKER = process.env.WORKER_URL || 'https://atproto-worker.yiesty.workers.
 const DID = process.env.OWNER_DID || 'did:web:atproto-worker.yiesty.workers.dev'
 const HANDLE = process.env.OWNER_HANDLE || 'atproto-worker.yiesty.workers.dev'
 
-async function main() {
-    const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'))
+const FETCH_TIMEOUT_MS = 15000
 
+async function fetchWithTimeout(url) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    try {
+        return await fetch(url, { signal: controller.signal })
+    } finally {
+        clearTimeout(timer)
+    }
+}
+
+async function report(name, url, sliceLen = 100) {
+    try {
+        const r = await fetchWithTimeout(url)
+        const body = await r.text()
+        console.log(`  ${name}: HTTP ${r.status} ${body.slice(0, sliceLen)}`)
+    } catch (e) {
+        console.log(`  ${name}: FAIL ${e.name === 'AbortError' ? 'timeout' : e.message}`)
+    }
+}
+
+async function main() {
     console.log('=== 1. Local journal integrity ===')
     try {
+        const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'))
+        if (!config.publicKey) {
+            throw new Error('config.json missing publicKey (run `node cli/seal.js init` first)')
+        }
         const journal = new JournalWriter('./journal.ndjson')
         const events = journal.readAll()
-        const { verifyCommitSig, recordCid, commitCid } = await import('./atproto.js')
+        const { verifyCommitSig, commitCid } = await import('./atproto.js')
         let ok = 0
         for (const e of events) {
             if (e.commitCid) {
@@ -42,42 +69,17 @@ async function main() {
     }
 
     console.log('\n=== 2. Deployed worker ===')
-    for (const path of ['xrpc/com.atproto.sync.getRepoStatus?did=' + DID, 'xrpc/_health']) {
-        try {
-            const r = await fetch(`${WORKER}/${path}`)
-            const body = await r.text()
-            console.log(`  ${path.split('?')[0].split('/').pop()}: HTTP ${r.status} ${body.slice(0, 80)}`)
-        } catch (e) {
-            console.log(`  ${path}: FAIL ${e.message}`)
-        }
-    }
+    await report('getRepoStatus', `${WORKER}/xrpc/com.atproto.sync.getRepoStatus?did=${DID}`)
+    await report('_health', `${WORKER}/xrpc/_health`)
 
     console.log('\n=== 3. appview resolveHandle (identity) ===')
-    try {
-        const r = await fetch(`https://api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle=${HANDLE}`)
-        const body = await r.text()
-        console.log(`  HTTP ${r.status} ${body.slice(0, 100)}`)
-    } catch (e) {
-        console.log(`  FAIL ${e.message}`)
-    }
+    await report('resolveHandle', `https://api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle=${HANDLE}`)
 
     console.log('\n=== 4. appview getProfile (indexing) ===')
-    try {
-        const r = await fetch(`https://api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=${DID}`)
-        const body = await r.text()
-        console.log(`  HTTP ${r.status} ${body.slice(0, 150)}`)
-    } catch (e) {
-        console.log(`  FAIL ${e.message}`)
-    }
+    await report('getProfile', `https://api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=${DID}`, 150)
 
     console.log('\n=== 5. bsky.network relay getRepoStatus ===')
-    try {
-        const r = await fetch(`https://bsky.network/xrpc/com.atproto.sync.getRepoStatus?did=${DID}`)
-        const body = await r.text()
-        console.log(`  HTTP ${r.status} ${body.slice(0, 100)}`)
-    } catch (e) {
-        console.log(`  FAIL ${e.message}`)
-    }
+    await report('relay getRepoStatus', `https://bsky.network/xrpc/com.atproto.sync.getRepoStatus?did=${DID}`)
 
     console.log('\nDone. Items 3+ indicate federation progress:')
     console.log('  3 OK = identity resolvable (relay knows your handle)')
