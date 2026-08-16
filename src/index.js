@@ -75,7 +75,7 @@ export default {
                     }), { status: 401, headers: { 'Content-Type': 'application/json' } })
                 } else {
                     await journal.refresh()
-                    const newEvents = await broadcastNewEvents(journal, env)
+                    const newEvents = await broadcastNewEvents(journal, env, did)
 
                     // Publishing is the moment the relay should re-crawl us
                     // (like the reference PDS Crawlers.notifyOfUpdate).
@@ -178,7 +178,7 @@ export default {
         if (env.ASSETS || env.JOURNAL_URL) {
             try {
                 await journal.refresh()
-                await broadcastNewEvents(journal, env)
+                await broadcastNewEvents(journal, env, did)
             } catch (e) {
                 console.error('Journal refresh failed:', e)
             }
@@ -199,9 +199,11 @@ const RELAY_CRAWL_URL = 'https://bsky.network/xrpc/com.atproto.sync.requestCrawl
  * worker itself is stateless (no KV, no database). The DO advances it only
  * after a successful broadcast, monotonically, so concurrent refreshes can't
  * drop or regress events.
+ * @param {string} [ownerDid] - effective owner DID (derived from the request
+ *   host by the caller); passed to the DO so it can filter without env vars.
  * @returns {Promise<Array>} the events that were broadcast
  */
-async function broadcastNewEvents(journal, env) {
+async function broadcastNewEvents(journal, env, ownerDid) {
     if (!env.FIREHOSE) return []
 
     const id = env.FIREHOSE.idFromName('main')
@@ -219,7 +221,7 @@ async function broadcastNewEvents(journal, env) {
 
     const resp = await stub.fetch('http://localhost/broadcast', {
         method: 'POST',
-        body: JSON.stringify({ events: newEvents }),
+        body: JSON.stringify({ events: newEvents, ownerDid }),
         headers: { 'Content-Type': 'application/json' }
     })
     if (!resp.ok) {

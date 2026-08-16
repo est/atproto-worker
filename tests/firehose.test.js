@@ -260,6 +260,23 @@ test('firehose - broadcast filters foreign events and formats frames', async () 
     assert.deepStrictEqual(bodies.map(b => b.commit.$link), [e1.commitCid, e2.commitCid])
 })
 
+test('firehose - broadcast uses the passed ownerDid and does not drop events when unset', async () => {
+    const CID = 'bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq'
+    const evt = (offset) => ({ offset, did: DID, time: 't', op: 'create', collection: 'app.bsky.feed.post', rkey: `r${offset}`, rev: `3aa${offset}`, prevRev: null, commitCid: CID, blocksB64: 'eA==' })
+
+    // no env OWNER_DID (deploy-button config): the worker passes ownerDid
+    const ws1 = fakeWs()
+    const fh1 = new Firehose(fakeWsState([ws1]), { JOURNAL_CONTENT: '', OWNER_DID: undefined })
+    await fh1.broadcast([evt(1)], DID)
+    assert.strictEqual(ws1.sent.length, 1, 'ownerDid param must filter correctly')
+
+    // neither env nor param: fail-open (pass everything), never silently drop
+    const ws2 = fakeWs()
+    const fh2 = new Firehose(fakeWsState([ws2]), { JOURNAL_CONTENT: '', OWNER_DID: undefined })
+    await fh2.broadcast([evt(1)])
+    assert.strictEqual(ws2.sent.length, 1, 'unset owner must not filter everything out')
+})
+
 test('firehose - error frame has op=-1 header', () => {
     const firehose = makeFirehose({})
     const frame = firehose.sendErrorFrame('InternalError', 'boom')

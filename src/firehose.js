@@ -75,7 +75,7 @@ export class Firehose {
 
         if (url.pathname === '/broadcast' && request.method === 'POST') {
             const body = await request.json()
-            const lastOffset = await this.broadcast(body.events)
+            const lastOffset = await this.broadcast(body.events, body.ownerDid)
             // Persist the broadcast cursor in DO storage: it survives across
             // requests without KV (the worker is otherwise stateless).
             const prev = parseInt(await this.state.storage.get('broadcast-cursor')) || -1
@@ -207,6 +207,11 @@ export class Firehose {
             const journal = new Journal(this.env)
             await journal.load()
 
+            // Owner DID derives from the journal when env vars are unset
+            // (the DO has no request host; the journal only ever contains
+            // the owner's events).
+            const ownerDid = this.env.OWNER_DID || (journal.events[0] && journal.events[0].did)
+
             // Page through the whole journal past the cursor — a fresh
             // subscriber must get every event or it indexes a partial repo.
             let lastOffset = cursor
@@ -214,8 +219,8 @@ export class Firehose {
                 const batch = journal.getEventsFromCursor(lastOffset, 1000)
                 if (batch.length === 0) break
 
-                // Filter by OWNER_DID
-                const events = batch.filter(e => e.did === this.env.OWNER_DID)
+                // Filter by OWNER_DID (fail-open: unknown owner passes all)
+                const events = ownerDid ? batch.filter(e => e.did === ownerDid) : batch
 
                 for (const event of events) {
                     const message = this.formatEvent(event)
@@ -255,10 +260,16 @@ export class Firehose {
     /**
      * Broadcast new events to all connected clients
      * @param {Array} events - New events from journal
+     * @param {string} [ownerDid] - owner DID (the worker passes its derived
+     *   value; the DO has no request host to derive it from, and env vars
+     *   may be unset in the deploy-button config). When unknown, pass all
+     *   events through — the journal only ever contains owner events, and
+     *   filtering on `undefined` silently dropped everything.
      * @returns {Promise<number>} the max offset of the broadcast events (-1 if none)
      */
-    async broadcast(events) {
-        const filteredEvents = events.filter(e => e.did === this.env.OWNER_DID)
+    async broadcast(events, ownerDid) {
+        const did = ownerDid || this.env.OWNER_DID
+        const filteredEvents = did ? events.filter(e => e.did === did) : events
         if (filteredEvents.length === 0) return -1
 
         const formattedEvents = filteredEvents.map(e => this.formatEvent(e))
