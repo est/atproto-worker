@@ -201,7 +201,11 @@ export class Firehose {
      */
     formatEvent(event) {
         let body
-        // New model: journal lines carry commitCid + blocksB64
+        // New model: journal lines carry commitCid + blocksB64.
+        // NOTE: commit / ops[].cid / prevData must be CID links (CBOR tag 42,
+        // {$link: ...}), not plain strings — the relay's LexLink.UnmarshalCBOR
+        // (cbg.ReadCid) fails on strings and drops the connection, which was
+        // the source of its reconnect loop.
         if (event.commitCid && event.blocksB64) {
             body = {
                 seq: event.offset,
@@ -209,15 +213,15 @@ export class Firehose {
                 rebase: false,
                 tooBig: false,
                 repo: event.did,
-                commit: event.commitCid,
+                commit: { $link: event.commitCid },
                 rev: event.rev,
                 since: event.prevRev || null,
-                prevData: event.prevMstRoot || null,
+                prevData: event.prevMstRoot ? { $link: event.prevMstRoot } : null,
                 blocks: base64ToBytes(event.blocksB64),
                 ops: [{
                     action: event.op,
                     path: `${event.collection}/${event.rkey}`,
-                    cid: event.op === 'delete' ? null : (event.recordCid || event.commitCid)
+                    cid: event.op === 'delete' ? null : { $link: event.recordCid || event.commitCid }
                 }],
                 blobs: []
             }
@@ -229,14 +233,14 @@ export class Firehose {
                 rebase: false,
                 tooBig: false,
                 repo: event.did,
-                commit: event.cid,
+                commit: { $link: event.cid },
                 rev: event.rev,
                 since: event.prevRev || null,
                 blocks: createCarFile(event.cid, []),
                 ops: [{
                     action: event.op,
                     path: `${event.collection}/${event.rkey}`,
-                    cid: event.op === 'delete' ? null : event.cid
+                    cid: event.op === 'delete' ? null : { $link: event.cid }
                 }],
                 blobs: []
             }

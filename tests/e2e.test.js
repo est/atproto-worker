@@ -5,8 +5,8 @@ import { JournalWriter } from '../cli/journal.js'
 import { Journal } from '../src/journal.js'
 import { Firehose } from '../src/firehose.js'
 import { handleXrpc } from '../src/xrpc.js'
-import { computeCID, cborEncode, cborDecode } from '../src/shared.js'
-import { createCar, carToBase64 } from '../cli/atproto.js'
+import { computeCID, cborEncode, cborDecode, commitToCbor } from '../src/shared.js'
+import { createCar, carToBase64, commitCid } from '../cli/atproto.js'
 
 const DID = 'did:web:e2e.local'
 const TEST_JOURNAL = './test-e2e-journal.ndjson'
@@ -39,12 +39,12 @@ async function writeJournal() {
     if (fs.existsSync(TEST_JOURNAL)) fs.unlinkSync(TEST_JOURNAL)
     const writer = new JournalWriter(TEST_JOURNAL)
 
-    const mkCommit = (rev, prev, sig) => ({ did: DID, version: 3, data: 'bafyreimst', rev, prev, sig: sig || 'x' })
-    const mkCarB64 = async (commit) => carToBase64(createCar(await computeCID(commit), [{ cid: await computeCID(commit), data: commit }]))
+    const mkCommit = (rev, prev) => ({ did: DID, version: 3, data: 'bafyreimst', rev, prev })
+    const mkCarB64 = async (commit) => carToBase64(createCar(await commitCid(commit), [{ cid: await commitCid(commit), data: commitToCbor(commit) }]))
 
     // --- event 1 ---
     const c1 = mkCommit('3aa1', null)
-    const commitCid1 = await computeCID(c1)
+    const commitCid1 = await commitCid(c1)
     const record1 = { $type: 'app.bsky.feed.post', text: 'hello atproto' }
     const recordCid1 = await computeCID(record1)
     const e1 = await writer.append({
@@ -57,7 +57,7 @@ async function writeJournal() {
 
     // --- event 2 ---
     const c2 = mkCommit('3aa2', commitCid1)
-    const commitCid2 = await computeCID(c2)
+    const commitCid2 = await commitCid(c2)
     const record2 = { $type: 'app.bsky.feed.post', text: 'second post' }
     const recordCid2 = await computeCID(record2)
     const e2 = await writer.append({
@@ -78,22 +78,22 @@ test('e2e - JournalWriter produces a valid journal', async () => {
 
     const writer = new JournalWriter(TEST_JOURNAL)
 
-    const c1 = { did: DID, version: 3, data: 'bafyreimst', rev: '3aa1', prev: null, sig: 'x1' }
-    const commitCid1 = await computeCID(c1)
+    const c1 = { did: DID, version: 3, data: 'bafyreimst', rev: '3aa1', prev: null }
+    const commitCid1 = await commitCid(c1)
     await writer.append({
         op: 'create', collection: 'app.bsky.feed.post', rkey: '3p1',
         record: { text: 'a' }, did: DID, rev: '3aa1', recordCid: 'r1',
         commit: c1, commitCid: commitCid1, prevMstRoot: null,
-        blocksB64: carToBase64(createCar(commitCid1, [{ cid: commitCid1, data: c1 }]))
+        blocksB64: carToBase64(createCar(commitCid1, [{ cid: commitCid1, data: commitToCbor(c1) }]))
     })
 
-    const c2 = { did: DID, version: 3, data: 'bafyreimst', rev: '3aa2', prev: commitCid1, sig: 'x2' }
-    const commitCid2 = await computeCID(c2)
+    const c2 = { did: DID, version: 3, data: 'bafyreimst', rev: '3aa2', prev: commitCid1 }
+    const commitCid2 = await commitCid(c2)
     await writer.append({
         op: 'create', collection: 'app.bsky.feed.post', rkey: '3p2',
         record: { text: 'b' }, did: DID, rev: '3aa2', recordCid: 'r2',
         commit: c2, commitCid: commitCid2, prevMstRoot: null,
-        blocksB64: carToBase64(createCar(commitCid2, [{ cid: commitCid2, data: c2 }]))
+        blocksB64: carToBase64(createCar(commitCid2, [{ cid: commitCid2, data: commitToCbor(c2) }]))
     })
 
     // Validate chain integrity (CLI-level: CIDs + commit chain)
@@ -186,7 +186,7 @@ test('e2e - refresh→getEventsFromCursor→firehose broadcast chain', async () 
     assert.deepStrictEqual(header, { op: 1, t: '#commit' })
     assert.strictEqual(body.seq, e2.offset)
     assert.strictEqual(body.repo, DID)
-    assert.strictEqual(body.commit, e2.commitCid)
+    assert.strictEqual(body.commit.$link, e2.commitCid)
     assert.strictEqual(body.ops[0].path, 'app.bsky.feed.post/3p2')
 
     // Broadcast to fake subscriber
@@ -196,7 +196,7 @@ test('e2e - refresh→getEventsFromCursor→firehose broadcast chain', async () 
 
     assert.strictEqual(ws.sent.length, 1)
     const { body: bCast } = decodeFrame(ws.sent[0])
-    assert.strictEqual(bCast.commit, e2.commitCid)
+    assert.strictEqual(bCast.commit.$link, e2.commitCid)
 })
 
 test('e2e - worker rejects journal with broken commit CID chain', async () => {

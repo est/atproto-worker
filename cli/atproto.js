@@ -10,7 +10,7 @@
  */
 
 import { webcrypto } from 'node:crypto'
-import { cborEncode, computeCID, cidToBytes, encodeVarint } from '../src/shared.js'
+import { cborEncode, computeCID, cidToBytes, encodeVarint, commitToCbor, commitCid as canonicalCommitCid } from '../src/shared.js'
 import { sign, verify } from './crypto.js'
 
 /**
@@ -33,9 +33,12 @@ export function buildUnsignedCommit(did, dataCid, rev, prevCid) {
 /**
  * Sign an unsigned commit with the owner private key.
  * Returns the full commit v3 object (with sig as hex string).
+ * The signature is computed over the canonical commit CBOR (data/prev as
+ * CID links, cbor-gen field order), matching the reference implementation
+ * so the relay's VerifySignature accepts it.
  */
 export async function signCommit(unsignedCommit, privateKeyHex) {
-  const encoded = cborEncode(unsignedCommit)
+  const encoded = commitToCbor(unsignedCommit)
   const sig = await sign(encoded, privateKeyHex)
   return { ...unsignedCommit, sig }
 }
@@ -45,7 +48,7 @@ export async function signCommit(unsignedCommit, privateKeyHex) {
  */
 export async function verifyCommitSig(commit, publicKeyHex) {
   const { sig, ...rest } = commit
-  const encoded = cborEncode(rest)
+  const encoded = commitToCbor(rest)
   return verify(encoded, sig, publicKeyHex)
 }
 
@@ -57,10 +60,10 @@ export async function recordCid(record) {
 }
 
 /**
- * Compute the CID of the commit object itself.
+ * Compute the CID of the commit object itself (canonical encoding).
  */
 export async function commitCid(commit) {
-  return computeCID(commit)
+  return canonicalCommitCid(commit)
 }
 
 /**

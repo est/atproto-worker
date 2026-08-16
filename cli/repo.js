@@ -143,8 +143,8 @@ export class RepoManager {
   }
 
   async commitBytes(commit) {
-    const { cborEncode } = await import('../src/shared.js')
-    return cborEncode(commit)
+    const { commitToCbor } = await import('../src/shared.js')
+    return commitToCbor(commit)
   }
 
   /**

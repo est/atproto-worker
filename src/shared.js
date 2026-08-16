@@ -88,7 +88,13 @@ export function cidToBytes(cidStr) {
 }
 
 export async function computeCID(value) {
-  const cbor = cborEncode(value)
+  return computeCidFromBytes(cborEncode(value))
+}
+
+/**
+ * CID v1 (dag-cbor, sha2-256) of raw CBOR bytes.
+ */
+export async function computeCidFromBytes(cbor) {
   const hash = await crypto.subtle.digest('SHA-256', cbor)
 
   // CID v1: version(1) + codec(dag-cbor=0x71) + hash-type(sha256=0x12) + hash-len(32) + hash
@@ -100,6 +106,43 @@ export async function computeCID(value) {
   cid.set(new Uint8Array(hash), 4)
 
   return 'b' + base32Encode(cid)
+}
+
+/**
+ * Hex string (from JSON journal lines) -> raw bytes (what CBOR needs).
+ */
+export function hexToBytes(hex) {
+  if (typeof hex !== 'string' || hex.length % 2 !== 0) {
+    throw new Error('Invalid hex string: ' + String(hex).slice(0, 20))
+  }
+  const bytes = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  }
+  return bytes
+}
+
+/**
+ * Canonical atproto commit v3 CBOR. Matches indigo's cbor-gen MarshalCBOR
+ * byte-for-byte: map keys in order did, rev, [sig], data, prev, version
+ * (the length-first-then-lexicographic sort below yields exactly this
+ * order), with data/prev as CID links (CBOR tag 42) and sig as raw bytes.
+ * The signature is computed over this encoding (minus sig), so a commit
+ * signed by our CLI verifies on the relay.
+ */
+export function commitToCbor(commit) {
+  const { did, version, rev, data, prev, sig } = commit
+  const obj = { did, rev, data: { $link: data }, prev: prev ? { $link: prev } : null }
+  if (sig) obj.sig = typeof sig === 'string' ? hexToBytes(sig) : sig
+  obj.version = version
+  return cborEncode(obj)
+}
+
+/**
+ * CID of a commit v3 object (canonical encoding, sig included).
+ */
+export async function commitCid(commit) {
+  return computeCidFromBytes(commitToCbor(commit))
 }
 
 // ============ CBOR (canonical, supports $link tag 42) ============

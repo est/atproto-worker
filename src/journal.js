@@ -3,7 +3,7 @@
  * Worker-side: reads local journal file, syncs from HTTP on refresh
  */
 
-import { computeCID } from './utils.js'
+import { computeCID, commitCid } from './utils.js'
 
 /**
  * Parse NDJSON journal content into events array
@@ -122,7 +122,7 @@ export class Journal {
                 if (!event.commit) {
                     throw new Error(`Missing commit object at offset ${event.offset}`)
                 }
-                const expectedCommitCid = await computeCID(event.commit)
+                const expectedCommitCid = await commitCid(event.commit)
                 if (event.commitCid !== expectedCommitCid) {
                     throw new Error(`Commit CID mismatch at offset ${event.offset}: expected ${expectedCommitCid}, got ${event.commitCid}`)
                 }

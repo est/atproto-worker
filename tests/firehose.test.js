@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import { Firehose, shouldAllowConnect } from '../src/firehose.js'
 import { JournalWriter } from '../cli/journal.js'
 import { cborEncode, cborDecode, computeCID, createCarFile } from '../src/shared.js'
+import { commitCid } from '../cli/atproto.js'
 
 const DID = 'did:web:test.local'
 const TEST_JOURNAL = './test-firehose-journal.ndjson'
@@ -104,10 +105,10 @@ async function buildJournal() {
     if (fs.existsSync(TEST_JOURNAL)) fs.unlinkSync(TEST_JOURNAL)
     const writer = new JournalWriter(TEST_JOURNAL)
 
-    const mkCommit = (rev, prev) => ({ did: DID, version: 3, data: 'bafyreimst', rev, prev, sig: 'x' })
+    const mkCommit = (rev, prev) => ({ did: DID, version: 3, data: 'bafyreimst', rev, prev })
 
     const c1 = mkCommit('3aa1', null)
-    const commitCid1 = await computeCID(c1)
+    const commitCid1 = await commitCid(c1)
     const e1 = await writer.append({
         op: 'create', collection: 'app.bsky.feed.post', rkey: '3p1',
         record: { text: 'one' }, did: DID, rev: '3aa1',
@@ -116,7 +117,7 @@ async function buildJournal() {
     })
 
     const c2 = mkCommit('3aa2', commitCid1)
-    const commitCid2 = await computeCID(c2)
+    const commitCid2 = await commitCid(c2)
     const e2 = await writer.append({
         op: 'create', collection: 'app.bsky.feed.post', rkey: '3p2',
         record: { text: 'two' }, did: DID, rev: '3aa2',
@@ -125,7 +126,7 @@ async function buildJournal() {
     })
 
     const c3 = mkCommit('3aa3', commitCid2)
-    const commitCid3 = await computeCID(c3)
+    const commitCid3 = await commitCid(c3)
     const e3 = await writer.append({
         op: 'create', collection: 'app.bsky.feed.post', rkey: '3p3',
         record: { text: 'three' }, did: 'did:web:foreign', rev: '3aa3',
@@ -152,15 +153,19 @@ test('firehose - frame header is op=1 t=#commit', () => {
     assert.strictEqual(body.seq, 100)
 })
 
-test('firehose - v1 event body carries full atproto fields', () => {
+test('firehose - v1 event body carries full atproto fields', async () => {
+    const commit = { did: DID, version: 3, data: 'bafyreimst', rev: '3aa1', prev: null, sig: 'x' }
+    const commitCid = await computeCID(commit)
+    const record = { $type: 'app.bsky.feed.post', text: 'hello' }
+    const recordCid = await computeCID(record)
     const event = {
         offset: 100, time: '2026-01-01T00:00:00.000Z',
         op: 'create', collection: 'app.bsky.feed.post', rkey: '3p1',
-        record: { $type: 'app.bsky.feed.post', text: 'hello' },
+        record,
         did: DID, rev: '3aa1',
-        recordCid: 'bafyreir1',
-        commit: { did: DID, version: 3, data: 'bafyreimst', rev: '3aa1', prev: null, sig: 'x' },
-        commitCid: 'bafyreicomm1',
+        recordCid,
+        commit,
+        commitCid,
         prevRev: null, prevMstRoot: null,
         blocksB64: 'aGVsbG8=' // "hello"
     }
@@ -172,7 +177,7 @@ test('firehose - v1 event body carries full atproto fields', () => {
     assert.strictEqual(body.rebase, false)
     assert.strictEqual(body.tooBig, false)
     assert.strictEqual(body.repo, DID)
-    assert.strictEqual(body.commit, event.commitCid)
+    assert.deepStrictEqual(body.commit, { $link: event.commitCid })
     assert.strictEqual(body.rev, '3aa1')
     assert.strictEqual(body.since, null)
     assert.strictEqual(body.prevData, null)
@@ -181,24 +186,25 @@ test('firehose - v1 event body carries full atproto fields', () => {
     assert.deepStrictEqual(body.ops, [{
         action: 'create',
         path: 'app.bsky.feed.post/3p1',
-        cid: event.recordCid
+        cid: { $link: event.recordCid }
     }])
     assert.deepStrictEqual(body.blobs, [])
 })
 
 test('firehose - v0 legacy event (cid, no commitCid) formats with empty CAR', async () => {
+    const cid = await computeCID({ legacy: true })
     const event = {
         offset: 0, time: '2026-01-01T00:00:00.000Z',
         op: 'create', collection: 'app.bsky.feed.post', rkey: '3p1',
         record: { text: 'legacy' }, did: DID, rev: '3aa0',
-        cid: 'bafyreilegacy', prevRev: null
+        cid, prevRev: null
     }
     const { header, body } = decodeFrame(makeFirehose({}).formatEvent(event))
 
     assert.deepStrictEqual(header, { op: 1, t: '#commit' })
-    assert.strictEqual(body.commit, event.cid)
+    assert.strictEqual(body.commit.$link, event.cid)
     assert.strictEqual(body.rev, event.rev)
-    assert.deepStrictEqual(body.ops, [{ action: 'create', path: 'app.bsky.feed.post/3p1', cid: event.cid }])
+    assert.deepStrictEqual(body.ops, [{ action: 'create', path: 'app.bsky.feed.post/3p1', cid: { $link: event.cid } }])
     // Legacy body ships an empty CAR rooted at the event CID
     const expectedCar = createCarFile(event.cid, [])
     assert.deepStrictEqual(body.blocks, expectedCar)
@@ -238,7 +244,7 @@ test('firehose - backfill with cursor N delivers only later events', async () =>
     const { header, body } = decodeFrame(ws.sent[0])
     assert.deepStrictEqual(header, { op: 1, t: '#commit' })
     assert.strictEqual(body.seq, e2.offset)
-    assert.strictEqual(body.commit, e2.commitCid)
+    assert.strictEqual(body.commit.$link, e2.commitCid)
 })
 
 test('firehose - broadcast filters foreign events and formats frames', async () => {
@@ -251,7 +257,7 @@ test('firehose - broadcast filters foreign events and formats frames', async () 
     assert.strictEqual(ws.sent.length, 2)
     const bodies = ws.sent.map(m => decodeFrame(m).body)
     assert.deepStrictEqual(bodies.map(b => b.seq), [e1.offset, e2.offset])
-    assert.deepStrictEqual(bodies.map(b => b.commit), [e1.commitCid, e2.commitCid])
+    assert.deepStrictEqual(bodies.map(b => b.commit.$link), [e1.commitCid, e2.commitCid])
 })
 
 test('firehose - error frame has op=-1 header', () => {
