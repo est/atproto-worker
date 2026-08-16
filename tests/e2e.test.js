@@ -235,9 +235,23 @@ test('e2e - describeServer returns did + didDoc (relay HostChecker contract)', a
     const journal = new Journal({ JOURNAL_CONTENT: content })
     await journal.load()
 
+    // describeServer self-discovers the main identity from the static
+    // .well-known/did.json (ASSETS), like the real worker.
+    const fakeAssets = {
+        fetch: async (url) => {
+            if (new URL(url).pathname === '/.well-known/did.json') {
+                return new Response(JSON.stringify({
+                    id: DID,
+                    verificationMethod: [{ id: `${DID}#atproto`, publicKeyMultibase: 'zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF' }]
+                }), { status: 200 })
+            }
+            return new Response('nf', { status: 404 })
+        }
+    }
+
     const res = await handleXrpc(
         new Request('http://localhost/xrpc/com.atproto.server.describeServer'),
-        { journal, did: DID, handle: 'e2e.local', env: { OWNER_PUBLIC_KEY: 'zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF' } }
+        { journal, did: DID, handle: 'e2e.local', env: { ASSETS: fakeAssets }, ownHost: 'e2e.local' }
     )
 
     assert.strictEqual(res.status, 200)

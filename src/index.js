@@ -96,20 +96,21 @@ export default {
                 response = handleAtprotoDid(did)
             }
             else if (path === '/.well-known/did.json') {
-                response = handleDidJson(url.host, handle, env.OWNER_PUBLIC_KEY, did)
+                response = await handleDidJson(env)
             }
             // XRPC API
             else if (path.startsWith('/xrpc/')) {
                 response = await handleXrpc(request, {
                     journal, did, handle, env,
-                    hosted: journal.hostedDids(did)
+                    hosted: journal.distinctDids(),
+                    ownHost: url.host
                 })
             }
             // Root: deployment checklist page (HTML) or server info (JSON)
             else if (path === '/') {
                 const wantsJson = (request.headers.get('Accept') || '').includes('application/json')
                 if (!wantsJson) {
-                    response = renderChecklistPage(env, journal, url.host)
+                    response = await renderChecklistPage(env, journal, url.host)
                 } else {
                     response = new Response(JSON.stringify({
                         name: 'atproto-worker',

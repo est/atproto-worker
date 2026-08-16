@@ -9,6 +9,7 @@
  */
 
 import { isValidDID, isValidHandle } from './utils.js'
+import { handleFromDid } from './identity.js'
 
 const PLACEHOLDERS = ['example.com', 'yourdomain.com', 'localhost']
 
@@ -27,10 +28,10 @@ export function effectiveIdentity(env, host) {
 
 /**
  * Check each configuration item and collect the status.
- * Returns { checks, phases } where checks is a list of
+ * Returns { checks, did, handle } where checks is a list of
  * { id, phase, label, status: 'ok'|'warn'|'missing', value, hint, command }
  */
-export function checkSetup(env, journal, host) {
+export async function checkSetup(env, journal, host) {
     const { did, handle } = effectiveIdentity(env, host)
     const checks = []
 
@@ -78,16 +79,24 @@ export function checkSetup(env, journal, host) {
         command: ''
     })
 
-    // Phase 2 — 唯一需要手动操作的一步：设置身份公钥
-    const pubkey = env.OWNER_PUBLIC_KEY
+    // Phase 2 — 身份文件（主账号公钥自发现：静态 .well-known/did.json）
+    let identityOk = false
+    if (env.ASSETS) {
+        try {
+            const identResp = await env.ASSETS.fetch('https://worker/.well-known/did.json')
+            identityOk = identResp.ok
+        } catch (e) {
+            identityOk = false
+        }
+    }
     checks.push({
         id: 'pubkey',
         phase: 2,
-        label: '身份公钥 OWNER_PUBLIC_KEY',
-        status: pubkey && pubkey.startsWith('z') && pubkey.length > 10 ? 'ok' : (pubkey ? 'warn' : 'missing'),
-        value: pubkey ? `${pubkey.slice(0, 12)}…` : '未设置',
-        hint: '你的身份公钥（公开信息）。没有它，联邦网络无法验证你发的帖子。三步搞定：',
-        command: '① 本地生成密钥对 → ② 复制 config.json 里的 publicKeyMultibase → ③ Dashboard 添加变量并部署（详见下方「下一步」卡片）'
+        label: '身份文件 .well-known/did.json（公钥自发现）',
+        status: identityOk ? 'ok' : 'missing',
+        value: identityOk ? '已部署（公钥随文件自动发现，无需环境变量）' : '未部署',
+        hint: '主账号公钥由本地 `node cli/seal.js init` 生成的身份文件提供，随 Worker 部署，不再需要环境变量。',
+        command: `node cli/seal.js init did:web:${host} ${host}   # 生成 public/.well-known/did.json 后重新部署`
     })
 
     // Phase 3 — 可选：外部托管 journal（默认用随 Worker 部署的静态资产，无需设置）
@@ -102,30 +111,32 @@ export function checkSetup(env, journal, host) {
         command: journalUrl ? '' : `JOURNAL_URL = "https://${host}/journal.ndjson"`
     })
 
-    // Phase 4 — 发布账号（可选）：每个账号是 did:web 身份，账号持有者在其
-    // 域名放两个静态文件即可（无需 DNS：handle 解析按规范先查 _atproto TXT，
-    // 失败回退到 https://<handle>/.well-known/atproto-did）。
-    const accounts = (journal && journal.accounts) || []
-    if (accounts.length === 0) {
+    // Phase 4 — 发布账号（可选，从 journal 自发现）：journal 里的每条事件
+    // 都带 did，did:web:<handle> 即账号；其公钥经 well-known 自发现
+    // （https://<handle>/.well-known/did.json），无需注册表。
+    const hostedDids = journal ? [...journal.distinctDids()] : []
+    const publishing = hostedDids.filter(d => d !== did)
+    if (publishing.length === 0) {
         checks.push({
             id: 'accounts',
             phase: 4,
             label: '发布账号（可选，多账号发布）',
             status: 'ok',
             value: '未配置（单账号模式）',
-            hint: '需要多个单向发布账号时，本地执行 account add，让每个账号持有者在其域名放两个静态文件（/.well-known/atproto-did 与 /.well-known/did.json，无需 DNS），即可解析其 handle。',
+            hint: '需要多个单向发布账号时，本地执行 account add，让每个账号持有者在其域名放两个静态文件（/.well-known/atproto-did 与 /.well-known/did.json），即可解析其 handle。',
             command: 'node cli/seal.js account add pub1.example.com'
         })
     } else {
-        for (const a of accounts) {
+        for (const adid of publishing) {
+            const ahandle = handleFromDid(adid) || adid
             checks.push({
-                id: `acct-${a.id}`,
+                id: `acct-${ahandle}`,
                 phase: 4,
-                label: `发布账号 ${a.handle}`,
+                label: `发布账号 ${ahandle}`,
                 status: 'ok',
-                value: a.did,
-                hint: `账号持有者需在域名放：https://${a.handle}/.well-known/atproto-did（内容 ${a.did}）与 /.well-known/did.json（service 指向本 PDS）。`,
-                command: `node cli/seal.js post --account ${a.id} "内容"`
+                value: adid,
+                hint: `账号持有者需在域名放：https://${ahandle}/.well-known/atproto-did（内容 ${adid}）与 /.well-known/did.json（service 指向本 PDS）。`,
+                command: `node cli/seal.js post --account ${ahandle.split('.')[0]} "内容"`
             })
         }
     }
@@ -137,8 +148,8 @@ export function checkSetup(env, journal, host) {
  * Render the checklist page as a self-contained HTML wizard
  * (inline CSS, no external dependencies).
  */
-export function renderChecklistPage(env, journal, host) {
-    const { checks, did, handle } = checkSetup(env, journal, host)
+export async function renderChecklistPage(env, journal, host) {
+    const { checks, did, handle } = await checkSetup(env, journal, host)
 
     const okCount = checks.filter(c => c.status === 'ok').length
     const total = checks.length
@@ -184,14 +195,13 @@ export function renderChecklistPage(env, journal, host) {
     if (firstMissing && firstMissing.id === 'pubkey') {
         nextStep = `
         <div class="next">
-            <h3>下一步：设置你的身份公钥（唯一需要手动的一步）</h3>
+            <h3>下一步：生成身份文件（唯一需要手动的一步，无需任何环境变量）</h3>
             <ol>
-                <li><b>本地生成密钥对</b>（需要 Node.js，一次性）：复制下面的命令到终端执行
+                <li><b>本地生成密钥对 + 身份文件</b>（需要 Node.js，一次性）：复制下面的命令到终端执行
                     <div class="cmd"><code>git clone https://github.com/est/atproto-worker && cd atproto-worker && npm install && node cli/seal.js init did:web:${escapeHtml(host)} ${escapeHtml(host)}</code>
                     <button class="copy" data-cmd="git clone https://github.com/est/atproto-worker && cd atproto-worker && npm install && node cli/seal.js init did:web:${escapeHtml(host)} ${escapeHtml(host)}">复制</button></div>
                 </li>
-                <li><b>复制公钥</b>：打开生成的 <code>config.json</code>，复制 <code>publicKeyMultibase</code> 的值（以 <code>z</code> 开头）</li>
-                <li><b>填到 Cloudflare</b>：Dashboard → 你的 Worker → <b>Settings → Variables and Secrets → 添加变量</b>：名称 <code>OWNER_PUBLIC_KEY</code>，值粘贴公钥 → <b>保存并部署</b></li>
+                <li><b>提交并部署</b>：init 已生成 <code>public/.well-known/did.json</code> 与 <code>public/.well-known/atproto-did</code>（公钥自发现，Worker 不需要任何环境变量）</li>
                 <li>回到本页刷新，此项即变绿 ✅</li>
             </ol>
         </div>`

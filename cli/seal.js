@@ -24,7 +24,6 @@ const CONFIG_PATH = './config.json'
 const JOURNAL_PATH = './journal.ndjson'
 const STATE_PATH = './.repo-state.json'
 const UPLOADS_DIR = './public/uploads'
-const ACCOUNTS_REGISTRY = './public/accounts.json'   // deployed with the Worker (public info)
 const ACCOUNTS_LOCAL = './config.accounts.json'      // local only, holds private keys (gitignored)
 
 /**
@@ -42,24 +41,10 @@ function saveAccountsLocal(accounts) {
 }
 
 /**
- * Load the deployable account registry (public/accounts.json).
- */
-function loadRegistry() {
-    if (fs.existsSync(ACCOUNTS_REGISTRY)) {
-        return JSON.parse(fs.readFileSync(ACCOUNTS_REGISTRY, 'utf-8'))
-    }
-    return { accounts: [] }
-}
-
-function saveRegistry(registry) {
-    fs.mkdirSync(path.dirname(ACCOUNTS_REGISTRY), { recursive: true })
-    fs.writeFileSync(ACCOUNTS_REGISTRY, JSON.stringify(registry, null, 2))
-}
-
-/**
- * Add a publishing account: generate a keypair, register it in the deployable
- * registry, and print the two things the account owner must host on their
- * domain: /.well-known/did.json content and the _atproto TXT record.
+ * Add a publishing account: generate a keypair (kept locally for signing)
+ * and print the two static files the account owner must host on their
+ * domain (/.well-known/atproto-did + /.well-known/did.json). No registry
+ * file is needed — the worker discovers accounts from the journal itself.
  */
 async function accountAdd(handle) {
     if (!handle || !handle.includes('.')) {
@@ -81,36 +66,10 @@ async function accountAdd(handle) {
     const { privateKey, publicKey } = await generateKeypair()
     const publicKeyMultibase = publicKeyToMultibase(publicKey)
 
-    const didDoc = {
-        '@context': [
-            'https://www.w3.org/ns/did/v1',
-            'https://w3id.org/security/multikey/multikey-v1.jsonld',
-            'https://w3id.org/security/suites/secp256k1-2019/v1'
-        ],
-        id: did,
-        alsoKnownAs: [`at://${handle}`],
-        verificationMethod: [{
-            id: `${did}#atproto`,
-            type: 'Multikey',
-            controller: did,
-            publicKeyMultibase
-        }],
-        service: [{
-            id: '#atproto_pds',
-            type: 'AtprotoPersonalDataServer',
-            serviceEndpoint: pdsUrl
-        }]
-    }
+    const didDoc = buildDidDoc(did, handle, publicKeyMultibase, pdsUrl)
 
-    // Deployable registry (public info) + local config (private key)
-    const registry = loadRegistry()
-    if (registry.accounts.some(a => a.did === did)) {
-        console.error(`Account ${did} already registered`)
-        process.exit(1)
-    }
-    registry.accounts.push({ id, handle, did, publicKeyMultibase })
-    saveRegistry(registry)
-
+    // Local config only (signing key); no deployable registry — the worker
+    // derives hosted accounts from the journal and keys from well-known.
     accounts[id] = { handle, did, privateKey, publicKey, publicKeyMultibase }
     saveAccountsLocal(accounts)
 
@@ -130,7 +89,7 @@ async function accountAdd(handle) {
     console.log('   （可选替代 DNS：在 _atproto.' + handle + ' 加 TXT "did=' + did + '" 也可以，二选一即可）')
     console.log('')
     console.log(`3) 发布：node cli/seal.js post --account ${id} "内容" [--image x.jpg]`)
-    console.log('   然后 cp journal.ndjson public/journal.ndjson && 部署（public/accounts.json 已生成）')
+    console.log('   然后 cp journal.ndjson public/journal.ndjson && 部署（Worker 从 journal 自动发现该账号）')
 }
 
 /**
@@ -173,20 +132,51 @@ async function init() {
 
     saveConfig(config)
 
+    // Write the static identity files the Worker serves and self-discovers
+    // (no env vars needed): /.well-known/did.json + /.well-known/atproto-did
+    const didDoc = buildDidDoc(config.did, config.handle, config.publicKeyMultibase)
+    fs.mkdirSync('./public/.well-known', { recursive: true })
+    fs.writeFileSync('./public/.well-known/did.json', JSON.stringify(didDoc, null, 2))
+    fs.writeFileSync('./public/.well-known/atproto-did', config.did + '\n')
+
     console.log('✓ Keypair generated')
     console.log(`  DID: ${did}`)
     console.log(`  Handle: ${handle}`)
     console.log(`  Public Key: ${publicKey.slice(0, 16)}...`)
     console.log(`  Multibase: ${config.publicKeyMultibase.slice(0, 20)}...`)
     console.log('')
-    console.log('Config saved to config.json (local only, already in .gitignore)')
+    console.log('✓ 身份文件已生成（公钥自发现，无需环境变量）：')
+    console.log('  public/.well-known/did.json')
+    console.log('  public/.well-known/atproto-did')
     console.log('')
-    console.log('Next steps for deployment:')
-    console.log(`  # 1. Copy the public key into wrangler.toml [vars]:`)
-    console.log(`  OWNER_PUBLIC_KEY = "${config.publicKeyMultibase}"`)
-    console.log('  # 2. Set OWNER_DID and OWNER_HANDLE in wrangler.toml to your did:web / handle')
-    console.log('  # 3. Deploy: npm run deploy')
-    console.log('  # The private key stays in config.json - the Worker never uses it.')
+    console.log('下一步：提交 public/.well-known/ 并部署（npm run deploy）。')
+    console.log('私钥保存在 config.json（本地，已 gitignore），Worker 永不接触。')
+}
+
+/**
+ * Build a did:web DID document (verificationMethod + atproto_pds service).
+ */
+function buildDidDoc(did, handle, publicKeyMultibase, pdsUrl) {
+    return {
+        '@context': [
+            'https://www.w3.org/ns/did/v1',
+            'https://w3id.org/security/multikey/multikey-v1.jsonld',
+            'https://w3id.org/security/suites/secp256k1-2019/v1'
+        ],
+        id: did,
+        alsoKnownAs: [`at://${handle}`],
+        verificationMethod: [{
+            id: `${did}#atproto`,
+            type: 'Multikey',
+            controller: did,
+            publicKeyMultibase
+        }],
+        service: [{
+            id: '#atproto_pds',
+            type: 'AtprotoPersonalDataServer',
+            serviceEndpoint: pdsUrl || `https://${handle}`
+        }]
+    }
 }
 
 /**

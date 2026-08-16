@@ -81,7 +81,7 @@ test('blob - getBlob serves from ASSETS with correct mime and caches', async () 
 
     const res = await handleXrpc(
         new Request(`http://localhost/xrpc/com.atproto.sync.getBlob?did=${DID}&cid=${PNG_CID}`),
-        { journal, did: DID, handle: 'test.local', env: { ASSETS: fakeAssets } }
+        { journal, did: DID, handle: 'test.local', env: { ASSETS: fakeAssets }, ownHost: 'test.local', hosted: new Set([DID]) }
     )
     assert.strictEqual(res.status, 200)
     assert.strictEqual(res.headers.get('Content-Type'), 'image/png')
@@ -92,14 +92,14 @@ test('blob - getBlob serves from ASSETS with correct mime and caches', async () 
     // missing blob → BlobNotFound
     const missing = await handleXrpc(
         new Request(`http://localhost/xrpc/com.atproto.sync.getBlob?did=${DID}&cid=${PNG_CID}`),
-        { journal, did: DID, handle: 'test.local', env: { ASSETS: { fetch: async () => new Response('nf', { status: 404 }) } } }
+        { journal, did: DID, handle: 'test.local', env: { ASSETS: { fetch: async () => new Response('nf', { status: 404 }) } }, ownHost: 'test.local', hosted: new Set([DID]) }
     )
     assert.strictEqual(missing.status, 404)
 
     // foreign did → BlobNotFound
     const foreign = await handleXrpc(
         new Request(`http://localhost/xrpc/com.atproto.sync.getBlob?did=did:web:other&cid=${PNG_CID}`),
-        { journal, did: DID, handle: 'test.local', env: { ASSETS: fakeAssets } }
+        { journal, did: DID, handle: 'test.local', env: { ASSETS: fakeAssets }, ownHost: 'test.local', hosted: new Set([DID]) }
     )
     assert.strictEqual(foreign.status, 404)
 })

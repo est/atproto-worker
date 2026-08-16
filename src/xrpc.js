@@ -4,6 +4,7 @@
  */
 
 import { resolveHandle, generateDidWebDocument } from './did.js'
+import { resolveIdentity, handleFromDid } from './identity.js'
 import { createCarFile, cborEncode, cborDecode, cidToBytes, encodeVarint, base32Encode, base64ToBytes, isValidCidString } from './shared.js'
 
 function xrpcError(status, error, message) {
@@ -32,10 +33,10 @@ function eventsForDid(journal, did) {
  * `hosted` is the set of DIDs this PDS serves (main did:web + publishing
  * accounts); falls back to the single main did when not provided.
  */
-export async function handleXrpc(request, { journal, did, handle, env, hosted }) {
+export async function handleXrpc(request, { journal, did, handle, env, hosted, ownHost }) {
     const url = new URL(request.url)
     const method = url.pathname.replace('/xrpc/', '')
-    const hostedSet = hosted || new Set([did])
+    const hostedSet = hosted || journal.distinctDids()
 
     switch (method) {
         case 'com.atproto.repo.getRecord':
@@ -48,7 +49,7 @@ export async function handleXrpc(request, { journal, did, handle, env, hosted })
             return handleResolveHandle(url, handle, did)
 
         case 'com.atproto.server.describeServer':
-            return handleDescribeServer(url, did, handle, env)
+            return handleDescribeServer(url, did, handle, env, ownHost)
 
         case 'com.atproto.sync.subscribeRepos':
             return handleSubscribeRepos(request, env, journal)
@@ -66,10 +67,10 @@ export async function handleXrpc(request, { journal, did, handle, env, hosted })
             return handleGetRepo(url, journal, hostedSet)
 
         case 'com.atproto.sync.getBlob':
-            return handleGetBlob(url, journal, hostedSet, env)
+            return handleGetBlob(url, journal, hostedSet, env, ownHost)
 
         case 'com.atproto.repo.describeRepo':
-            return handleDescribeRepo(url, journal, handle, did, env, hostedSet)
+            return handleDescribeRepo(url, journal, handle, did, env, hostedSet, ownHost)
 
         case '_health':
             return handleHealth(journal)
@@ -177,13 +178,17 @@ async function handleResolveHandle(url, ownerHandle, ownerDid) {
  * The relay's HostChecker calls this once to decide we're a PDS; any HTTP
  * error becomes ErrHostNotPDS. Include the DID doc like the reference PDS.
  */
-function handleDescribeServer(url, did, handle, env) {
-    const didDoc = generateDidWebDocument(
-        handle,
-        handle,
-        env && env.OWNER_PUBLIC_KEY,
-        did
-    )
+/**
+ * com.atproto.server.describeServer
+ * The relay's HostChecker calls this once to decide we're a PDS; any HTTP
+ * error becomes ErrHostNotPDS. The didDoc is self-discovered: the main
+ * account's identity comes from the static .well-known/did.json (ASSETS).
+ */
+async function handleDescribeServer(url, did, handle, env, ownHost) {
+    const ident = await resolveIdentity(env, did, ownHost)
+    const didDoc = ident
+        ? generateDidWebDocument(ident.handle, ident.handle, ident.publicKeyMultibase, did)
+        : null
     return xrpcSuccess({
         did: did,
         didDoc,
@@ -465,7 +470,7 @@ const BLOB_CANDIDATES = [
     ['avif', 'image/avif'],
 ]
 
-async function handleGetBlob(url, journal, hosted, env) {
+async function handleGetBlob(url, journal, hosted, env, ownHost) {
     const did = url.searchParams.get('did')
     const cid = url.searchParams.get('cid')
 
@@ -476,10 +481,11 @@ async function handleGetBlob(url, journal, hosted, env) {
         return xrpcError(404, 'BlobNotFound', 'Blob not found')
     }
 
-    // Publishing accounts use uploads/<accountId>/; the main did:web account
-    // keeps blobs at the uploads/ root (backward compatible).
-    const account = journal.accountForDid(did)
-    const prefix = account ? `uploads/${account.id}/` : 'uploads/'
+    // The main did:web account keeps blobs at uploads/ root (backward
+    // compatible); publishing accounts use uploads/<handle>/ (derived from
+    // the did — no registry needed).
+    const handle = handleFromDid(did)
+    const prefix = handle && handle !== ownHost ? `uploads/${handle}/` : 'uploads/'
 
     for (const [ext, mime] of BLOB_CANDIDATES) {
         const resp = await env.ASSETS.fetch(`https://worker/${prefix}${cid}.${ext}`)
@@ -500,36 +506,34 @@ async function handleGetBlob(url, journal, hosted, env) {
 /**
  * com.atproto.repo.describeRepo
  * Get information about an account and its repository.
+ * The account's handle + public key are self-discovered via well-known
+ * (own host → static ASSETS file; external did:web → cached fetch).
  */
-function handleDescribeRepo(url, journal, mainHandle, mainDid, env, hosted) {
+async function handleDescribeRepo(url, journal, mainHandle, mainDid, env, hosted, ownHost) {
     const repo = url.searchParams.get('repo')
 
     if (!repo) {
         return xrpcError(400, 'InvalidRequest', 'repo is required')
     }
 
-    // Resolve repo (did or handle) to a hosted account (main or registry)
+    // Resolve repo (did or handle) to a hosted account
     let did = repo.startsWith('did:') ? repo : null
     if (!did) {
-        const byHandle = journal.accounts.find(a => a.handle === repo)
-        if (byHandle) did = byHandle.did
-        else if (repo === mainHandle) did = mainDid
+        for (const d of hosted) {
+            if (handleFromDid(d) === repo) { did = d; break }
+        }
+        if (!did && repo === mainHandle) did = mainDid
     }
     if (!did || !hosted.has(did)) {
         return xrpcError(400, 'InvalidRequest', 'Can only describe hosted repos')
     }
 
-    let handle, pubkey
-    const account = journal.accountForDid(did)
-    if (account) {
-        handle = account.handle
-        pubkey = account.publicKeyMultibase
-    } else {
-        handle = mainHandle
-        pubkey = env.OWNER_PUBLIC_KEY
+    const ident = await resolveIdentity(env, did, ownHost)
+    if (!ident) {
+        return xrpcError(400, 'InvalidRequest', 'Cannot resolve account identity (well-known not hosted?)')
     }
 
-    const didDoc = generateDidWebDocument(handle, handle, pubkey, did)
+    const didDoc = generateDidWebDocument(ident.handle, ident.handle, ident.publicKeyMultibase, did)
 
     // Collections belonging to this account (index keys are did-prefixed)
     const collections = [...journal.byCollection.keys()]
@@ -537,7 +541,7 @@ function handleDescribeRepo(url, journal, mainHandle, mainDid, env, hosted) {
         .map(k => k.slice(did.length + 1))
 
     return xrpcSuccess({
-        handle,
+        handle: ident.handle,
         did,
         didDoc,
         collections,

@@ -56,35 +56,20 @@ export class Journal {
             this.index()
         }
 
-        // Publishing-account registry (deployed asset, may not exist).
-        this.accounts = []
-        if (this.env.ASSETS) {
-            const resp = await this.env.ASSETS.fetch('https://worker/accounts.json')
-            if (resp.ok) {
-                try {
-                    this.accounts = (await resp.json()).accounts || []
-                } catch (e) {
-                    this.accounts = []
-                }
-            }
-        }
-
         this.loaded = true
     }
 
     /**
-     * DIDs hosted by this PDS: the publishing accounts from the registry,
-     * plus the main did:web identity passed by the caller.
+     * DIDs hosted by this PDS — derived from the journal itself (every
+     * event carries its account's did; the journal is the source of truth,
+     * so no separate account registry is needed).
      */
-    hostedDids(mainDid) {
-        return new Set([mainDid, ...this.accounts.map(a => a.did)])
-    }
-
-    /**
-     * Resolve an account registry entry by did, or null.
-     */
-    accountForDid(did) {
-        return this.accounts.find(a => a.did === did) || null
+    distinctDids() {
+        const dids = new Set()
+        for (const e of this.events) {
+            if (e.did) dids.add(e.did)
+        }
+        return dids
     }
 
     /**

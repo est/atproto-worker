@@ -52,38 +52,29 @@ export function generateDidWebDocument(host, handle, publicKeyMultibase, did) {
 }
 
 /**
- * Handle /.well-known/did.json for did:web
- * Only serves documents for did:web identities
+ * Handle /.well-known/did.json for the main did:web identity.
+ * The document is a STATIC FILE (public/.well-known/did.json, written by
+ * `node cli/seal.js init`) served from the ASSETS binding — no env var key
+ * needed, and the same file backs the self-discovery path (identity.js).
  */
-export function handleDidJson(host, handle, publicKeyMultibase, ownerDid) {
-    const expectedDid = `did:web:${host}`
-    const did = ownerDid || expectedDid
-
-    // Only serve did:web documents
-    if (!did.startsWith('did:web:')) {
-        return new Response(JSON.stringify({
-            error: 'NotDidWeb',
-            message: `This endpoint only serves did:web documents. Owner DID is ${did}`
-        }), {
-            status: 404,
-            headers: { 'Content-Type': 'application/json' }
-        })
+export async function handleDidJson(env) {
+    if (env.ASSETS) {
+        const resp = await env.ASSETS.fetch('https://worker/.well-known/did.json')
+        if (resp.ok) {
+            return new Response(resp.body, {
+                headers: {
+                    'Content-Type': 'application/did+ld+json',
+                    'Cache-Control': 'public, max-age=300'
+                }
+            })
+        }
     }
-
-    // If ownerDid is a did:web but for a different host, warn
-    if (ownerDid && ownerDid !== expectedDid) {
-        return new Response(JSON.stringify({
-            error: 'DIDMismatch',
-            message: `Owner DID ${ownerDid} does not match host did:web:${host}`
-        }), {
-            status: 400,
-            headers: { 'Content-Type': 'application/json' }
-        })
-    }
-
-    const doc = generateDidWebDocument(host, handle, publicKeyMultibase, did)
-    return new Response(JSON.stringify(doc, null, 2), {
-        headers: { 'Content-Type': 'application/did+ld+json' }
+    return new Response(JSON.stringify({
+        error: 'IdentityNotConfigured',
+        message: '身份文件未部署：本地运行 `node cli/seal.js init` 生成 public/.well-known/did.json 后重新部署'
+    }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' }
     })
 }
 

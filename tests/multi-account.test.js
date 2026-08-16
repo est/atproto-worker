@@ -46,9 +46,6 @@ function fakeAssets(accounts = []) {
         files,
         fetch: async (url) => {
             const key = new URL(url).pathname
-            if (key === '/accounts.json') {
-                return new Response(JSON.stringify({ accounts }), { status: 200 })
-            }
             if (files[key]) return new Response(files[key], { status: 200 })
             return new Response('not found', { status: 404 })
         }
@@ -60,6 +57,8 @@ test('multi-account - unified journal validates per-did chains', async () => {
     const journal = new Journal({ JOURNAL_CONTENT: content })
     await journal.load()
     assert.strictEqual(journal.events.length, 4)
+    // hosted dids derive from the journal itself (no registry)
+    assert.deepStrictEqual([...journal.distinctDids()].sort(), [MAIN_DID, ACCT_DID].sort())
 })
 
 test('multi-account - broken chain in one account is rejected', async () => {
@@ -74,15 +73,15 @@ test('multi-account - broken chain in one account is rejected', async () => {
 
 test('multi-account - xrpc routes records and repo status by did', async () => {
     const { content } = await buildMultiAccountJournal()
-    const assets = fakeAssets([{ id: 'pub1', handle: 'pub1.example.com', did: ACCT_DID }])
-    const journal = new Journal({ JOURNAL_CONTENT: content, ASSETS: assets })
+    const journal = new Journal({ JOURNAL_CONTENT: content })
     await journal.load()
-    const env = { ASSETS: assets, OWNER_PUBLIC_KEY: 'zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF' }
+    const env = {}
+    const hosted = journal.distinctDids()
 
     // record of the publishing account
     const rec = await handleXrpc(
         new Request(`http://localhost/xrpc/com.atproto.repo.getRecord?repo=${ACCT_DID}&collection=app.bsky.feed.post&rkey=rB2`),
-        { journal, did: MAIN_DID, handle: 'test.local', env, hosted: journal.hostedDids(MAIN_DID) }
+        { journal, did: MAIN_DID, handle: 'test.local', env, hosted }
     )
     assert.strictEqual(rec.status, 200)
     const recData = await rec.json()
@@ -92,7 +91,7 @@ test('multi-account - xrpc routes records and repo status by did', async () => {
     // repo status for the publishing account
     const status = await handleXrpc(
         new Request(`http://localhost/xrpc/com.atproto.sync.getRepoStatus?did=${ACCT_DID}`),
-        { journal, did: MAIN_DID, handle: 'test.local', env, hosted: journal.hostedDids(MAIN_DID) }
+        { journal, did: MAIN_DID, handle: 'test.local', env, hosted }
     )
     const statusData = await status.json()
     assert.strictEqual(statusData.active, true)
@@ -101,23 +100,43 @@ test('multi-account - xrpc routes records and repo status by did', async () => {
     // unhosted did rejected
     const foreign = await handleXrpc(
         new Request(`http://localhost/xrpc/com.atproto.sync.getRepoStatus?did=did:web:stranger.com`),
-        { journal, did: MAIN_DID, handle: 'test.local', env, hosted: journal.hostedDids(MAIN_DID) }
+        { journal, did: MAIN_DID, handle: 'test.local', env, hosted }
     )
     assert.strictEqual(foreign.status, 400)
 })
 
-test('multi-account - getBlob routes to the account uploads namespace', async () => {
+test('multi-account - getBlob routes by handle-derived namespace', async () => {
     const CID = 'bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq'
-    const assets = fakeAssets([{ id: 'pub1', handle: 'pub1.example.com', did: ACCT_DID }])
-    assets.files['/uploads/pub1/' + CID + '.png'] = Buffer.from([1, 2, 3])
-    const journal = new Journal({ JOURNAL_CONTENT: '', ASSETS: assets })
+    const { content } = await buildMultiAccountJournal()
+    const assets = fakeAssets()
+    assets.files['/uploads/pub1.example.com/' + CID + '.png'] = Buffer.from([1, 2, 3])
+    const journal = new Journal({ JOURNAL_CONTENT: content, ASSETS: assets })
     await journal.load()
     const env = { ASSETS: assets }
 
     const res = await handleXrpc(
         new Request(`http://localhost/xrpc/com.atproto.sync.getBlob?did=${ACCT_DID}&cid=${CID}`),
-        { journal, did: MAIN_DID, handle: 'test.local', env, hosted: journal.hostedDids(MAIN_DID) }
+        { journal, did: MAIN_DID, handle: 'test.local', env, hosted: journal.distinctDids(), ownHost: 'test.local' }
     )
     assert.strictEqual(res.status, 200)
     assert.strictEqual(res.headers.get('Content-Type'), 'image/png')
+})
+
+test('identity - own-host did resolves from the static ASSETS did.json', async () => {
+    const assets = fakeAssets()
+    assets.files['/.well-known/did.json'] = JSON.stringify({
+        id: MAIN_DID,
+        verificationMethod: [{ id: `${MAIN_DID}#atproto`, publicKeyMultibase: 'zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF' }]
+    })
+    const { resolveIdentity, handleFromDid, keyFromDidDoc } = await import('../src/identity.js')
+
+    assert.strictEqual(handleFromDid(ACCT_DID), 'pub1.example.com')
+    assert.strictEqual(handleFromDid('did:plc:abc'), null)
+
+    const ident = await resolveIdentity({ ASSETS: assets }, MAIN_DID, 'test.local')
+    assert.ok(ident)
+    assert.strictEqual(ident.handle, 'test.local')
+    assert.strictEqual(ident.publicKeyMultibase, 'zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF')
+
+    assert.strictEqual(keyFromDidDoc({ verificationMethod: [{ id: '#atproto', publicKeyMultibase: 'zKEY' }] }), 'zKEY')
 })

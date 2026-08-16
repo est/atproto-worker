@@ -27,20 +27,15 @@ tag = "v1"
 new_sqlite_classes = ["Firehose"]
 
 [vars]
-# 本文件不含任何身份配置 —— 一键部署后 Worker 会从部署域名自动推导身份：
+# 本文件不含任何身份配置 —— 一键部署后 Worker 从部署域名自动推导身份：
 #   OWNER_DID    = "did:web:<你的域名>"
 #   OWNER_HANDLE = "<你的域名>"
-# 唯一必须手动设置的是 OWNER_PUBLIC_KEY（你的身份公钥，非机密）：
-#   Workers Dashboard → Settings → Variables and Secrets → 添加变量：
-#   名称 OWNER_PUBLIC_KEY，值 = 本地 `node cli/seal.js init` 生成的 config.json 中
-#   的 publicKeyMultibase → 保存并部署。部署检查页(首页)会引导你完成每一步。
-#
-# 可选：
-#   JOURNAL_URL  — journal 外部托管地址（默认使用随 Worker 部署的静态资产，无需设置）
+# 公钥完全自发现：本地 `node cli/seal.js init` 生成 public/.well-known/did.json
+# （含公钥）随 Worker 部署；发布账号的公钥经各自域名的 well-known 获取。
+# 无需任何环境变量或 secret。
 
 # Note: PRIVATE_KEY is only used by the local CLI (cli/seal.js), not by the Worker.
 # It lives in config.json locally and must NEVER be committed or deployed as an env var.
-# The Worker only ever needs the public key (OWNER_PUBLIC_KEY above). No secrets required.
 
 # Development overrides
 [env.dev.vars]
