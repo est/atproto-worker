@@ -1,6 +1,17 @@
 # atproto-worker
 
-A stateless AT Protocol publisher on Cloudflare Workers. Your journal is a signed append-only log (`journal.ndjson`); the Worker serves it via standard atproto endpoints. No database, no mutable state.
+A stateless AT Protocol publisher on Cloudflare Workers. Your journal is a signed append-only log (`journal.ndjson`); the Worker serves it via standard atproto endpoints. No database, no mutable state, no KV.
+
+## 🚀 一键部署（不需要懂 atproto 或 Cloudflare）
+
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/est/atproto-worker)
+
+1. 点击上方按钮 → 授权 GitHub → 创建 Cloudflare 账号（如已有则登录）
+2. 部署完成后打开你的 Worker 域名（`https://<你的域名>.workers.dev`）
+3. **首页就是部署向导**：DID 和句柄已自动识别，唯一要手动做的是设置身份公钥（向导里有逐步指引，只需本地跑一条命令生成密钥对）
+4. 按向导发布第一条帖子，点击「检查联邦收录」，几分钟后即可在 Bluesky 上看到
+
+> 一键部署会自动配置：Durable Object（firehose）、静态资产（journal）、定时任务、身份自动推导。私钥始终留在你本地，Worker 永不接触。
 
 ## Architecture
 
@@ -30,7 +41,7 @@ mutable state, no external static hosting.
 ### Prerequisites
 
 - Node.js 19+
-- Cloudflare account
+- Cloudflare account（或用上方一键部署按钮）
 
 ### 1. Install & Initialize
 

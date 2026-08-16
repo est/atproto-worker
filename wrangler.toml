@@ -27,15 +27,16 @@ tag = "v1"
 new_sqlite_classes = ["Firehose"]
 
 [vars]
-# Public configuration (not sensitive, safe in version control)
-# Set after running `node cli/seal.js init`
-OWNER_DID = "did:web:atproto-worker.yiesty.workers.dev"
-OWNER_HANDLE = "atproto-worker.yiesty.workers.dev"
-# Multibase public key from config.json (after init)
-OWNER_PUBLIC_KEY = "zQ3shZXSYEFob9hKne1G3igx7zS9b3s4H48nghqzKer2U3p34"
-# URL to fetch journal from (for /refresh endpoint).
-# With static assets enabled this points at this Worker's own /journal.ndjson.
-JOURNAL_URL = "https://atproto-worker.yiesty.workers.dev/journal.ndjson"
+# 本文件不含任何身份配置 —— 一键部署后 Worker 会从部署域名自动推导身份：
+#   OWNER_DID    = "did:web:<你的域名>"
+#   OWNER_HANDLE = "<你的域名>"
+# 唯一必须手动设置的是 OWNER_PUBLIC_KEY（你的身份公钥，非机密）：
+#   Workers Dashboard → Settings → Variables and Secrets → 添加变量：
+#   名称 OWNER_PUBLIC_KEY，值 = 本地 `node cli/seal.js init` 生成的 config.json 中
+#   的 publicKeyMultibase → 保存并部署。部署检查页(首页)会引导你完成每一步。
+#
+# 可选：
+#   JOURNAL_URL  — journal 外部托管地址（默认使用随 Worker 部署的静态资产，无需设置）
 
 # Note: PRIVATE_KEY is only used by the local CLI (cli/seal.js), not by the Worker.
 # It lives in config.json locally and must NEVER be committed or deployed as an env var.
@@ -43,6 +44,7 @@ JOURNAL_URL = "https://atproto-worker.yiesty.workers.dev/journal.ndjson"
 
 # Development overrides
 [env.dev.vars]
+# Local dev identity (dev-only, derived from "localhost" otherwise)
 OWNER_DID = "did:web:localhost"
 OWNER_HANDLE = "localhost"
 # Local dev journal is loaded from file via JOURNAL_CONTENT (npm run dev:local)

@@ -80,7 +80,7 @@ export default {
                     // Publishing is the moment the relay should re-crawl us
                     // (like the reference PDS Crawlers.notifyOfUpdate).
                     // No throttle needed: /refresh is human-triggered, rare.
-                    ctx.waitUntil(notifyRelay(env))
+                    ctx.waitUntil(notifyRelay(env, handle))
 
                     response = new Response(JSON.stringify({
                         ok: true,
@@ -159,19 +159,23 @@ export default {
     },
 
     /**
-     * Scheduled cron - sync interactions from Bluesky
+     * Scheduled cron - refresh journal, sync interactions, broadcast
      */
     async scheduled(controller, env, ctx) {
         const journal = new Journal(env)
         await journal.load()
 
-        const did = env.OWNER_DID
+        // Identity derives from the deployed host when vars are unset
+        // (deploy-button friendly). Scheduled handlers have no request host,
+        // so OWNER_HANDLE (or the derived did:web) is the anchor.
         const handle = env.OWNER_HANDLE
+        const did = env.OWNER_DID || (handle ? `did:web:${handle}` : null)
 
         if (!did) return
 
-        // Optionally refresh journal on cron
-        if (env.JOURNAL_URL) {
+        // Refresh + broadcast: ASSETS is the default journal source, so the
+        // cron always refreshes when ASSETS (or an external JOURNAL_URL) exists.
+        if (env.ASSETS || env.JOURNAL_URL) {
             try {
                 await journal.refresh()
                 await broadcastNewEvents(journal, env)
@@ -228,16 +232,17 @@ async function broadcastNewEvents(journal, env) {
 /**
  * POST com.atproto.sync.requestCrawl to the relay so it crawls our repo.
  * Called on publish (/refresh), not on a timer — no throttle needed.
+ * `handle` is the effective (possibly host-derived) handle.
  */
-async function notifyRelay(env) {
-    if (!env.OWNER_HANDLE) return
+async function notifyRelay(env, handle) {
+    if (!handle) return
     try {
         const resp = await fetch(RELAY_CRAWL_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ hostname: env.OWNER_HANDLE })
+            body: JSON.stringify({ hostname: handle })
         })
-        console.log(`[relay] requestCrawl for ${env.OWNER_HANDLE}: ${resp.status}`)
+        console.log(`[relay] requestCrawl for ${handle}: ${resp.status}`)
     } catch (e) {
         console.error('[relay] requestCrawl failed:', e.message)
     }
