@@ -102,6 +102,34 @@ export function checkSetup(env, journal, host) {
         command: journalUrl ? '' : `JOURNAL_URL = "https://${host}/journal.ndjson"`
     })
 
+    // Phase 4 — 发布账号（可选）：每个账号是 did:web 身份，账号持有者在其
+    // 域名放两个静态文件即可（无需 DNS：handle 解析按规范先查 _atproto TXT，
+    // 失败回退到 https://<handle>/.well-known/atproto-did）。
+    const accounts = (journal && journal.accounts) || []
+    if (accounts.length === 0) {
+        checks.push({
+            id: 'accounts',
+            phase: 4,
+            label: '发布账号（可选，多账号发布）',
+            status: 'ok',
+            value: '未配置（单账号模式）',
+            hint: '需要多个单向发布账号时，本地执行 account add，让每个账号持有者在其域名放两个静态文件（/.well-known/atproto-did 与 /.well-known/did.json，无需 DNS），即可解析其 handle。',
+            command: 'node cli/seal.js account add pub1.example.com'
+        })
+    } else {
+        for (const a of accounts) {
+            checks.push({
+                id: `acct-${a.id}`,
+                phase: 4,
+                label: `发布账号 ${a.handle}`,
+                status: 'ok',
+                value: a.did,
+                hint: `账号持有者需在域名放：https://${a.handle}/.well-known/atproto-did（内容 ${a.did}）与 /.well-known/did.json（service 指向本 PDS）。`,
+                command: `node cli/seal.js post --account ${a.id} "内容"`
+            })
+        }
+    }
+
     return { checks, did, handle }
 }
 
@@ -137,7 +165,7 @@ export function renderChecklistPage(env, journal, host) {
                 <button class="copy" data-cmd="${escapeHtml(c.command)}">复制</button>
             </div>`
 
-        const phaseLabel = c.phase === 1 ? '一键部署（自动）' : (c.phase === 2 ? '身份配置（手动）' : '可选')
+        const phaseLabel = c.phase === 1 ? '一键部署（自动）' : (c.phase === 2 ? '身份配置（手动）' : (c.phase === 4 ? '发布账号（可选）' : '可选'))
         return `<div class="check ${c.status}">
             <div class="row">
                 <span class="icon">${icon}</span>
