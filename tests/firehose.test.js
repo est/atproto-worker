@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert'
 import fs from 'node:fs'
-import { Firehose } from '../src/firehose.js'
+import { Firehose, shouldAllowConnect } from '../src/firehose.js'
 import { JournalWriter } from '../cli/journal.js'
 import { cborEncode, cborDecode, computeCID, createCarFile } from '../src/shared.js'
 
@@ -40,6 +40,60 @@ function fakeState(ws) {
 
 function makeFirehose(env, ws) {
     return new Firehose(fakeState(ws), env)
+}
+
+// --- handleWebSocket-level helpers (quota protection) ---
+
+// Node's Response rejects status 101 (the Workers runtime allows it), so wrap
+// it to let the upgrade path be tested; success responses carry a
+// `switchingProtocols` flag instead.
+globalThis.Response = class extends Response {
+    constructor(body, init) {
+        if (init?.status === 101) {
+            super(body, { ...init, status: 200 })
+            this.switchingProtocols = true
+        } else {
+            super(body, init)
+        }
+    }
+}
+
+// Minimal WebSocketPair stand-in: Object.values(new WebSocketPair()) must
+// return [client, server].
+globalThis.WebSocketPair = class {
+    constructor() {
+        this[0] = { send() {}, close() {} }
+        this[1] = { send() {}, serializeAttachment() {} }
+    }
+}
+
+function fakeStorage() {
+    const m = new Map()
+    return {
+        async get(k) { return m.get(k) },
+        async put(k, v) { m.set(k, v) }
+    }
+}
+
+function fakeWsState(wsList = []) {
+    const state = {
+        storage: fakeStorage(),
+        accepted: [],
+        waitUntil(p) { if (p && p.catch) p.catch(() => {}) },
+        acceptWebSocket(ws) { this.accepted.push(ws) },
+        getWebSockets() { return wsList }
+    }
+    return state
+}
+
+// Fake request object for handleWebSocket (avoids undici's forbidden-header
+// rules for `Upgrade`).
+function wsRequest(ip, ua) {
+    const headers = new Map()
+    headers.set('upgrade', 'websocket')
+    if (ip) headers.set('cf-connecting-ip', ip)
+    if (ua) headers.set('user-agent', ua)
+    return { headers: { get: k => headers.get(k.toLowerCase()) ?? null } }
 }
 
 /**
@@ -207,4 +261,54 @@ test('firehose - error frame has op=-1 header', () => {
     const { header, body } = decodeFrame(frame)
     assert.deepStrictEqual(header, { op: -1 })
     assert.deepStrictEqual(body, { error: 'InternalError', message: 'boom' })
+})
+
+test('firehose - shouldAllowConnect allows up to the window limit then blocks', () => {
+    const now = 1_000_000
+    let attempts = []
+    for (let i = 0; i < 8; i++) {
+        const r = shouldAllowConnect(attempts, now)
+        assert.strictEqual(r.allowed, true, `attempt ${i} should be allowed`)
+        attempts = [...r.recent, now + i]
+    }
+    assert.strictEqual(shouldAllowConnect(attempts, now + 8).allowed, false)
+})
+
+test('firehose - shouldAllowConnect forgets attempts outside the window', () => {
+    const now = 1_000_000
+    const r = shouldAllowConnect([now - 120_000, now - 90_000], now)
+    assert.strictEqual(r.allowed, true)
+    assert.deepStrictEqual(r.recent, [])
+})
+
+test('firehose - handleWebSocket rate-limits rapid reconnects from same IP', async () => {
+    const firehose = new Firehose(fakeWsState(), { JOURNAL_CONTENT: '', OWNER_DID: DID })
+    const url = new URL('http://localhost/subscribe')
+
+    let last
+    for (let i = 0; i < 8; i++) {
+        last = await firehose.handleWebSocket(wsRequest('1.2.3.4', 'indigo-relay'), url)
+    }
+    assert.strictEqual(last.switchingProtocols, true)
+
+    const rejected = await firehose.handleWebSocket(wsRequest('1.2.3.4', 'indigo-relay'), url)
+    assert.strictEqual(rejected.status, 429)
+
+    // a different IP is unaffected
+    const other = await firehose.handleWebSocket(wsRequest('5.6.7.8', 'indigo-relay'), url)
+    assert.strictEqual(other.switchingProtocols, true)
+})
+
+test('firehose - handleWebSocket rejects when concurrent socket cap is reached', async () => {
+    const open = Array.from({ length: 8 }, () => ({ send() {} }))
+    const firehose = new Firehose(fakeWsState(open), {})
+    const res = await firehose.handleWebSocket(wsRequest('9.9.9.9'), new URL('http://localhost/subscribe'))
+    assert.strictEqual(res.status, 503)
+})
+
+test('firehose - handleWebSocket requires a websocket upgrade', async () => {
+    const firehose = new Firehose(fakeWsState(), {})
+    const req = { headers: { get: () => null } }
+    const res = await firehose.handleWebSocket(req, new URL('http://localhost/subscribe'))
+    assert.strictEqual(res.status, 426)
 })

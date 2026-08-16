@@ -14,6 +14,27 @@ function base64ToBytes(b64) {
     return bytes
 }
 
+// Connection limits for the firehose. A client whose stream dies right after
+// the upgrade (e.g. a relay failing commit verification) will otherwise
+// reconnect at seconds-per-attempt with no backoff — indigo's slurper only
+// backs off on *dial* failure, and each attempt is one DO request. On the
+// free tier that burns the monthly DO quota within hours. Rejecting the
+// upgrade with a non-101 status turns each attempt into a dial failure,
+// which does trigger client-side backoff.
+export const CONNECT_WINDOW_MS = 60_000
+export const MAX_CONNECTS_PER_WINDOW = 8
+export const MAX_CONCURRENT_SOCKETS = 8
+
+/**
+ * Sliding-window connect limiter decision. `recentAttempts` are timestamps
+ * of prior attempts from the same client; returns whether a new attempt is
+ * allowed plus the trimmed list to persist.
+ */
+export function shouldAllowConnect(recentAttempts, now, max = MAX_CONNECTS_PER_WINDOW, windowMs = CONNECT_WINDOW_MS) {
+    const recent = recentAttempts.filter(t => now - t < windowMs)
+    return { allowed: recent.length < max, recent }
+}
+
 /**
  * Firehose Durable Object
  */
@@ -48,25 +69,47 @@ export class Firehose {
             return new Response('Expected WebSocket', { status: 426 })
         }
 
-        const cursor = url.searchParams.get('cursor')
         const cfConnectingIp = request.headers.get('CF-Connecting-IP') || 'unknown'
         const userAgent = request.headers.get('User-Agent') || 'unknown'
+
+        // Per-IP connect rate limit (protects the DO free-tier quota from
+        // reconnect storms; see shouldAllowConnect).
+        const ipKey = `ws-attempts:${cfConnectingIp}`
+        const prevAttempts = (await this.state.storage.get(ipKey)) || []
+        const { allowed, recent } = shouldAllowConnect(prevAttempts, Date.now())
+        if (!allowed) {
+            console.warn(`[firehose] rate-limiting WS connects from ${cfConnectingIp} (${userAgent}): ${recent.length} in the last minute`)
+            return new Response(JSON.stringify({
+                error: 'RateLimited',
+                message: 'Too many connection attempts, retry later'
+            }), { status: 429, headers: { 'Content-Type': 'application/json' } })
+        }
+        await this.state.storage.put(ipKey, [...recent, Date.now()], { expirationTtl: 120 })
+
+        // Cap concurrent sockets so one client can't pile up open connections
+        const openSockets = this.state.getWebSockets()
+        if (openSockets.length >= MAX_CONCURRENT_SOCKETS) {
+            console.warn(`[firehose] rejecting WS connect from ${cfConnectingIp}: ${openSockets.length} sockets open`)
+            return new Response(JSON.stringify({
+                error: 'TooManyClients',
+                message: 'Too many active connections'
+            }), { status: 503, headers: { 'Content-Type': 'application/json' } })
+        }
+
+        const cursorParam = url.searchParams.get('cursor')
+        const cursor = cursorParam === null || Number.isNaN(parseInt(cursorParam)) ? null : parseInt(cursorParam)
         console.log(`[firehose] WS connect from ${cfConnectingIp} (${userAgent}) cursor=${cursor} path=${url.pathname}`)
 
         const [client, server] = Object.values(new WebSocketPair())
 
         // Need to accept the server-side websocket via state to handle events
         this.state.acceptWebSocket(server)
-        server.serializeAttachment({ cursor: cursor ? parseInt(cursor) : null })
+        server.serializeAttachment({ cursor })
 
         // Backfill from journal: no cursor = new subscriber, send everything
         // (matches relay expectations: a fresh host subscription gets the
         // full history so it can index the repo without prior events)
-        if (cursor === null) {
-            this.state.waitUntil(this.backfill(server, -1))
-        } else if (cursor !== null) {
-            this.state.waitUntil(this.backfill(server, parseInt(cursor)))
-        }
+        this.state.waitUntil(this.backfill(server, cursor === null ? -1 : cursor))
 
         console.log(`New WebSocket client connected, cursor: ${cursor}`)
 

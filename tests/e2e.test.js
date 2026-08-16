@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import { JournalWriter } from '../cli/journal.js'
 import { Journal } from '../src/journal.js'
 import { Firehose } from '../src/firehose.js'
+import { handleXrpc } from '../src/xrpc.js'
 import { computeCID, cborEncode, cborDecode } from '../src/shared.js'
 import { createCar, carToBase64 } from '../cli/atproto.js'
 
@@ -226,4 +227,24 @@ test('e2e - worker rejects journal with broken prev link', async () => {
         () => journal.load(),
         /Journal chain broken/
     )
+})
+
+test('e2e - describeServer returns did + didDoc (relay HostChecker contract)', async () => {
+    const { content } = await writeJournal()
+    const journal = new Journal({ JOURNAL_CONTENT: content })
+    await journal.load()
+
+    const res = await handleXrpc(
+        new Request('http://localhost/xrpc/com.atproto.server.describeServer'),
+        { journal, did: DID, handle: 'e2e.local', env: { OWNER_PUBLIC_KEY: 'zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF' } }
+    )
+
+    assert.strictEqual(res.status, 200)
+    const data = await res.json()
+    assert.strictEqual(data.did, DID)
+    assert.strictEqual(data.didDoc.id, DID)
+    assert.strictEqual(data.didDoc.service[0].type, 'AtprotoPersonalDataServer')
+    assert.strictEqual(data.didDoc.service[0].serviceEndpoint, 'https://e2e.local')
+    assert.deepStrictEqual(data.availableUserDomains, [])
+    assert.strictEqual(data.inviteCodeRequired, false)
 })

@@ -32,6 +32,7 @@ dist/
 
 atproto-interop-tests
 atproto-reference
+indigo
 .mimocode
 *.sublime-*
 .repo-state.json

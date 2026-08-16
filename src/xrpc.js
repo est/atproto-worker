@@ -45,7 +45,7 @@ export async function handleXrpc(request, { journal, did, handle, env }) {
             return handleResolveHandle(url, handle, did)
 
         case 'com.atproto.server.describeServer':
-            return handleDescribeServer(url, did)
+            return handleDescribeServer(url, did, handle, env)
 
         case 'com.atproto.sync.subscribeRepos':
             return handleSubscribeRepos(request, env, journal)
@@ -168,10 +168,19 @@ async function handleResolveHandle(url, ownerHandle, ownerDid) {
 
 /**
  * com.atproto.server.describeServer
+ * The relay's HostChecker calls this once to decide we're a PDS; any HTTP
+ * error becomes ErrHostNotPDS. Include the DID doc like the reference PDS.
  */
-function handleDescribeServer(url, did) {
+function handleDescribeServer(url, did, handle, env) {
+    const didDoc = generateDidWebDocument(
+        handle,
+        handle,
+        env && env.OWNER_PUBLIC_KEY,
+        did
+    )
     return xrpcSuccess({
         did: did,
+        didDoc,
         availableUserDomains: [],
         inviteCodeRequired: false,
         phoneVerificationRequired: false,

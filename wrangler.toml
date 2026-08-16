@@ -4,9 +4,12 @@ compatibility_date = "2025-07-18"
 # websocket_hibernation is enabled by default since 2024-04-03;
 # the explicit flag name was removed in newer runtimes.
 
-# Cron for interaction sync
+# Cron for interaction sync + journal refresh + relay notify.
+# 15 min: the relay notification is independently throttled to 20 min via KV,
+# and interaction sync makes up to 40 external requests per run, so every-5
+# minutes was mostly wasted quota.
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/15 * * * *"]
 
 # KV for journal cache
 # Create with: npx wrangler kv namespace create JOURNAL_KV
