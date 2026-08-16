@@ -93,36 +93,29 @@ OWNER_PUBLIC_KEY = "zQ3sh..."        # from config.json after init
 JOURNAL_URL = "https://your-worker.subdomain.workers.dev/journal.ndjson"
 ```
 
-### 3. Create a KV namespace
-
-```bash
-npx wrangler kv namespace create JOURNAL_KV
-```
-
-Copy the returned ID into `wrangler.toml` under `[[kv_namespaces]]`.
-
-### 4. Publish your first post
+### 3. Publish your first post
 
 ```bash
 node cli/seal.js post "Hello from atproto-worker!"
 cp journal.ndjson public/journal.ndjson
 ```
 
-### 5. Deploy
+### 4. Deploy
 
 ```bash
 npm run deploy
 ```
 
-### 6. Refresh
+### 5. Refresh
 
-Reload the journal (fetches from the Worker's own static asset):
+Reload the journal (fetches from the Worker's own static asset), broadcasts
+new events to the firehose, and pokes the relay to re-crawl:
 
 ```bash
 curl https://your-worker.subdomain.workers.dev/refresh
 ```
 
-Or wait for the cron (every 5 minutes). The deployment checklist at `/`
+Or wait for the cron (every 15 minutes). The deployment checklist at `/`
 shows the live status of every step.
 
 > **No secrets needed.** The Worker only ever reads the public key. There

@@ -1,6 +1,7 @@
 /**
  * Interaction syncing - fetch likes/reposts/replies from Bluesky
- * For event-sourced model, stores in KV (not journal)
+ * Log-only (ADR-015): counts are printed, never persisted anywhere
+ * (no journal write, no KV).
  */
 
 const BSKY_API = 'https://public.api.bsky.app'
@@ -48,7 +49,6 @@ async function syncLikes(journal, ownerDid) {
             if (!resp.ok) continue
 
             const data = await resp.json()
-            // Store in KV if available (not journal - journal is immutable)
             console.log(`Post ${post.rkey} has ${data.likes?.length || 0} likes`)
         } catch (e) {
             console.error('Error fetching likes:', e)
@@ -81,7 +81,7 @@ async function syncReposts(journal, ownerDid) {
 }
 
 export async function syncFollowers(journal, ownerDid) {
-    // Followers go to KV, not journal
+    // Log-only (ADR-015): no persistence.
     try {
         const resp = await fetch(
             `${BSKY_API}/xrpc/app.bsky.graph.getFollowers?actor=${encodeURIComponent(ownerDid)}&limit=50`,

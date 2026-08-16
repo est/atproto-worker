@@ -250,62 +250,80 @@ test('e2e - describeServer returns did + didDoc (relay HostChecker contract)', a
     assert.strictEqual(data.inviteCodeRequired, false)
 })
 
-function fakeKv(initial = {}) {
-    const m = new Map(Object.entries(initial))
+// A fake Firehose DO stub that mirrors the real one: /cursor returns the
+// persisted cursor, /broadcast advances it (max, monotonic) on success.
+function fakeFirehose(advanceOnBroadcast = true) {
+    let cursor = -1
+    const broadcasts = []
     return {
-        async get(k) { return m.get(k) },
-        async put(k, v) { m.set(k, v) }
+        broadcasts,
+        getCursor: () => cursor,
+        env: {
+            FIREHOSE: {
+                idFromName: () => 'main',
+                get: () => ({
+                    fetch: async (u, opts) => {
+                        const url = new URL(u)
+                        if (url.pathname === '/cursor') {
+                            return new Response(JSON.stringify({ cursor }))
+                        }
+                        if (url.pathname === '/broadcast' && opts.method === 'POST') {
+                            const events = JSON.parse(opts.body).events
+                            broadcasts.push(events)
+                            if (advanceOnBroadcast && events.length > 0) {
+                                cursor = Math.max(cursor, events[events.length - 1].offset)
+                            }
+                            return new Response('OK')
+                        }
+                        return new Response('Not Found', { status: 404 })
+                    }
+                })
+            }
+        }
     }
 }
 
 test('e2e - broadcastNewEvents advances cursor only after a successful broadcast', async () => {
-    const { content, e1, e2 } = await writeJournal()
-    const journal = new Journal({ JOURNAL_CONTENT: content })
-    await journal.load()
-
-    const kv = fakeKv()
-    let broadcastPayloads = []
-    const env = {
-        JOURNAL_KV: kv,
-        FIREHOSE: {
-            idFromName: () => 'main',
-            get: () => ({
-                fetch: async (u, opts) => {
-                    broadcastPayloads.push(JSON.parse(opts.body).events)
-                    return new Response('OK')
-                }
-            })
-        }
-    }
-
-    const first = await broadcastNewEvents(journal, env, {})
-    assert.strictEqual(first.length, 2)
-    assert.strictEqual(broadcastPayloads.length, 1)
-    assert.strictEqual(await kv.get('firehose-cursor'), String(e2.offset))
-
-    // second run: nothing new
-    const second = await broadcastNewEvents(journal, env, {})
-    assert.strictEqual(second.length, 0)
-    assert.strictEqual(broadcastPayloads.length, 1)
-})
-
-test('e2e - broadcastNewEvents does not advance cursor when broadcast fails', async () => {
     const { content, e2 } = await writeJournal()
     const journal = new Journal({ JOURNAL_CONTENT: content })
     await journal.load()
 
-    const kv = fakeKv()
-    const env = {
-        JOURNAL_KV: kv,
-        FIREHOSE: {
-            idFromName: () => 'main',
-            get: () => ({ fetch: async () => new Response('ERR', { status: 500 }) })
-        }
-    }
+    const fh = fakeFirehose()
+    const first = await broadcastNewEvents(journal, fh.env)
+    assert.strictEqual(first.length, 2)
+    assert.strictEqual(fh.broadcasts.length, 1)
+    assert.strictEqual(fh.getCursor(), e2.offset)
 
-    const result = await broadcastNewEvents(journal, env, {})
+    // second run: nothing new
+    const second = await broadcastNewEvents(journal, fh.env)
+    assert.strictEqual(second.length, 0)
+    assert.strictEqual(fh.broadcasts.length, 1)
+})
+
+test('e2e - broadcastNewEvents does not advance cursor when broadcast fails', async () => {
+    const { content } = await writeJournal()
+    const journal = new Journal({ JOURNAL_CONTENT: content })
+    await journal.load()
+
+    // broadcast fails -> cursor untouched, events NOT lost (retried later)
+    const failing = fakeFirehose(false)
+    failing.env.FIREHOSE.get = () => ({
+        fetch: async (u, opts) => {
+            if (new URL(u).pathname === '/cursor') {
+                return new Response(JSON.stringify({ cursor: failing.getCursor() }))
+            }
+            return new Response('ERR', { status: 500 })
+        }
+    })
+
+    const result = await broadcastNewEvents(journal, failing.env)
     assert.strictEqual(result.length, 0)
-    assert.strictEqual(await kv.get('firehose-cursor'), undefined)
+    assert.strictEqual(failing.getCursor(), -1)
+
+    // a later successful broadcast still delivers all events
+    const healthy = fakeFirehose()
+    const retried = await broadcastNewEvents(journal, healthy.env)
+    assert.strictEqual(retried.length, 2)
 })
 
 test('e2e - getRecord returns the record cid for v1 events', async () => {

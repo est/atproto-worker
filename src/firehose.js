@@ -66,8 +66,22 @@ export class Firehose {
 
         if (url.pathname === '/broadcast' && request.method === 'POST') {
             const body = await request.json()
-            await this.broadcast(body.events)
+            const lastOffset = await this.broadcast(body.events)
+            // Persist the broadcast cursor in DO storage: it survives across
+            // requests without KV (the worker is otherwise stateless).
+            const prev = parseInt(await this.state.storage.get('broadcast-cursor')) || -1
+            const next = Math.max(prev, lastOffset)
+            await this.state.storage.put('broadcast-cursor', String(next))
             return new Response('OK')
+        }
+
+        // Read back the last-broadcast offset (used by /refresh and the cron
+        // to decide which journal events are new).
+        if (url.pathname === '/cursor') {
+            const cursor = parseInt(await this.state.storage.get('broadcast-cursor')) || -1
+            return new Response(JSON.stringify({ cursor }), {
+                headers: { 'Content-Type': 'application/json' }
+            })
         }
 
         return new Response('Not Found', { status: 404 })
@@ -232,10 +246,11 @@ export class Firehose {
     /**
      * Broadcast new events to all connected clients
      * @param {Array} events - New events from journal
+     * @returns {Promise<number>} the max offset of the broadcast events (-1 if none)
      */
     async broadcast(events) {
         const filteredEvents = events.filter(e => e.did === this.env.OWNER_DID)
-        if (filteredEvents.length === 0) return
+        if (filteredEvents.length === 0) return -1
 
         const formattedEvents = filteredEvents.map(e => this.formatEvent(e))
         const sockets = this.state.getWebSockets()
@@ -252,6 +267,7 @@ export class Firehose {
                 }
             }
         }
+        return filteredEvents[filteredEvents.length - 1].offset
     }
 
     /**

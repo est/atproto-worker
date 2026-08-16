@@ -66,7 +66,7 @@ export default {
             // Refresh endpoint - sync journal from HTTP source.
             // Optional shared-secret gate: if REFRESH_TOKEN is set, require
             // `Authorization: Bearer <token>` — otherwise anyone can burn
-            // worker/KV quota by hammering this endpoint.
+            // worker quota by hammering this endpoint.
             if (path === '/refresh') {
                 if (env.REFRESH_TOKEN && request.headers.get('Authorization') !== `Bearer ${env.REFRESH_TOKEN}`) {
                     response = new Response(JSON.stringify({
@@ -75,7 +75,12 @@ export default {
                     }), { status: 401, headers: { 'Content-Type': 'application/json' } })
                 } else {
                     await journal.refresh()
-                    const newEvents = await broadcastNewEvents(journal, env, ctx)
+                    const newEvents = await broadcastNewEvents(journal, env)
+
+                    // Publishing is the moment the relay should re-crawl us
+                    // (like the reference PDS Crawlers.notifyOfUpdate).
+                    // No throttle needed: /refresh is human-triggered, rare.
+                    ctx.waitUntil(notifyRelay(env))
 
                     response = new Response(JSON.stringify({
                         ok: true,
@@ -169,60 +174,45 @@ export default {
         if (env.JOURNAL_URL) {
             try {
                 await journal.refresh()
-                await broadcastNewEvents(journal, env, ctx)
+                await broadcastNewEvents(journal, env)
             } catch (e) {
                 console.error('Journal refresh failed:', e)
             }
         }
 
-        // Sync interactions (these go to separate KV, not journal)
-        // Sync interactions (these go to separate KV, not journal).
-        // Throttled to every 6h: each run makes up to 40 external bsky
-        // fetches whose results are only logged (see ADR-015), so running
-        // them every 15 min is wasted work and quota.
-        if (env.JOURNAL_KV) {
-            const lastInteractions = parseInt(await env.JOURNAL_KV.get('interactions-last')) || 0
-            if (Date.now() - lastInteractions >= INTERACTIONS_THROTTLE_MS) {
-                ctx.waitUntil(syncInteractions(journal, did, handle).then(
-                    () => env.JOURNAL_KV.put('interactions-last', String(Date.now())),
-                    () => {}
-                ))
-            }
-        }
-
-        // Declare ourselves to the relay (like the reference PDS
-        // Crawlers.notifyOfUpdate, 20-min throttle). Lets the relay know
-        // we exist so it can subscribe and index our repo.
-        if (env.OWNER_HANDLE && env.JOURNAL_KV) {
-            ctx.waitUntil(notifyRelay(env))
-        }
+        // Sync interactions (log-only, see ADR-015): fetch like/repost
+        // counts from the bsky public API and log them. Results are not
+        // persisted anywhere — no KV, no journal.
+        ctx.waitUntil(syncInteractions(journal, did, handle))
     }
 }
 
 const RELAY_CRAWL_URL = 'https://bsky.network/xrpc/com.atproto.sync.requestCrawl'
-const RELAY_NOTIFY_THROTTLE_MS = 20 * 60 * 1000 // 20 min
-const INTERACTIONS_THROTTLE_MS = 6 * 60 * 60 * 1000 // 6 h
-const FIREHOSE_CURSOR_KEY = 'firehose-cursor'
 
 /**
  * Broadcast journal events past the last-broadcast offset to connected
- * firehose subscribers. The cursor is persisted in KV so it survives across
- * requests — the journal is a static asset, so a CID-diff between load() and
- * refresh() (both reading the same ASSETS) would never detect new events.
- *
- * The cursor advances ONLY after the DO broadcast succeeds, and never
- * backwards (monotonic max) so concurrent refreshes can't drop or regress it.
+ * firehose subscribers. The cursor lives in the Firehose DO's storage — the
+ * worker itself is stateless (no KV, no database). The DO advances it only
+ * after a successful broadcast, monotonically, so concurrent refreshes can't
+ * drop or regress events.
  * @returns {Promise<Array>} the events that were broadcast
  */
-async function broadcastNewEvents(journal, env, ctx) {
-    if (!env.FIREHOSE || !env.JOURNAL_KV) return []
-
-    const lastOffset = parseInt(await env.JOURNAL_KV.get(FIREHOSE_CURSOR_KEY)) || -1
-    const newEvents = journal.events.filter(e => e.offset > lastOffset)
-    if (newEvents.length === 0) return []
+async function broadcastNewEvents(journal, env) {
+    if (!env.FIREHOSE) return []
 
     const id = env.FIREHOSE.idFromName('main')
     const stub = env.FIREHOSE.get(id)
+
+    const cursorResp = await stub.fetch('http://localhost/cursor')
+    if (!cursorResp.ok) {
+        console.error('[firehose] cursor read failed, skipping broadcast')
+        return []
+    }
+    const { cursor = -1 } = await cursorResp.json()
+
+    const newEvents = journal.events.filter(e => e.offset > cursor)
+    if (newEvents.length === 0) return []
+
     const resp = await stub.fetch('http://localhost/broadcast', {
         method: 'POST',
         body: JSON.stringify({ events: newEvents }),
@@ -232,31 +222,22 @@ async function broadcastNewEvents(journal, env, ctx) {
         console.error(`[firehose] broadcast failed (${resp.status}), cursor not advanced`)
         return []
     }
-
-    const nextCursor = Math.max(lastOffset, newEvents[newEvents.length - 1].offset)
-    await env.JOURNAL_KV.put(FIREHOSE_CURSOR_KEY, String(nextCursor))
     return newEvents
 }
 
 /**
  * POST com.atproto.sync.requestCrawl to the relay so it crawls our repo.
- * Throttled via KV (last notification timestamp) to avoid spam.
+ * Called on publish (/refresh), not on a timer — no throttle needed.
  */
 async function notifyRelay(env) {
+    if (!env.OWNER_HANDLE) return
     try {
-        const now = Date.now()
-        const last = parseInt(await env.JOURNAL_KV.get('relay-notify-ts')) || 0
-        if (now - last < RELAY_NOTIFY_THROTTLE_MS) return
-
         const resp = await fetch(RELAY_CRAWL_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ hostname: env.OWNER_HANDLE })
         })
         console.log(`[relay] requestCrawl for ${env.OWNER_HANDLE}: ${resp.status}`)
-        if (resp.ok) {
-            await env.JOURNAL_KV.put('relay-notify-ts', String(now))
-        }
     } catch (e) {
         console.error('[relay] requestCrawl failed:', e.message)
     }

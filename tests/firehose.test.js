@@ -348,6 +348,25 @@ test('firehose - per-IP socket cap rejects a second socket from the same IP', as
     assert.strictEqual(other.switchingProtocols, true)
 })
 
+test('firehose - /broadcast persists cursor in DO storage, /cursor reads it', async () => {
+    const firehose = new Firehose(fakeWsState(), { OWNER_DID: DID })
+    const evt = (offset) => ({
+        offset, did: DID, time: 't', op: 'create',
+        collection: 'app.bsky.feed.post', rkey: `r${offset}`, rev: `3aa${offset}`,
+        prevRev: null, commitCid: 'bafyreicomm' + offset, blocksB64: 'aGVsbG8='
+    })
+
+    await firehose.fetch(new Request('http://localhost/broadcast', {
+        method: 'POST',
+        body: JSON.stringify({ events: [evt(5), evt(6)] }),
+        headers: { 'Content-Type': 'application/json' }
+    }))
+
+    const cur = await firehose.fetch(new Request('http://localhost/cursor'))
+    assert.strictEqual(cur.status, 200)
+    assert.deepStrictEqual(await cur.json(), { cursor: 6 })
+})
+
 test('firehose - unexpected client message closes the socket', async () => {
     let closed = false
     const ws = { close: () => { closed = true } }

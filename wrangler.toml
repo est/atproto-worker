@@ -4,19 +4,11 @@ compatibility_date = "2025-07-18"
 # websocket_hibernation is enabled by default since 2024-04-03;
 # the explicit flag name was removed in newer runtimes.
 
-# Cron for interaction sync + journal refresh + relay notify.
-# 15 min: the relay notification is independently throttled to 20 min via KV,
-# and interaction sync makes up to 40 external requests per run, so every-5
-# minutes was mostly wasted quota.
+# Cron for interaction sync + journal refresh.
+# 15 min: interaction sync is log-only (ADR-015), journal refresh picks up
+# asset changes, and the firehose broadcast cursor lives in the DO.
 [triggers]
 crons = ["*/15 * * * *"]
-
-# KV for journal cache
-# Create with: npx wrangler kv namespace create JOURNAL_KV
-# Then replace the id below with the returned namespace ID.
-[[kv_namespaces]]
-binding = "JOURNAL_KV"
-id = "3414327b849649a0befbb5aeb26a95cd"
 
 # Static assets: journal.ndjson is deployed with the Worker.
 # JOURNAL_URL points back to this Worker's own /journal.ndjson,

@@ -113,9 +113,9 @@ export class Journal {
         let prevOffset = -1
 
         for (const event of events) {
-            // Offsets must be strictly increasing: the KV firehose cursor and
-            // listRecords cursors key off offsets, so a rebuilt (non-append)
-            // journal silently invalidates them.
+            // Offsets must be strictly increasing: the firehose broadcast
+            // cursor and listRecords cursors key off offsets, so a rebuilt
+            // (non-append) journal silently invalidates them.
             if (event.offset !== undefined && event.offset !== null && event.offset <= prevOffset) {
                 throw new Error(`Journal offsets not strictly increasing at offset ${event.offset}`)
             }

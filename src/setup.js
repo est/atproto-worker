@@ -20,16 +20,6 @@ export function checkSetup(env, journal) {
     const host = env.OWNER_HANDLE || env.OWNER_DID?.replace('did:web:', '') || 'your.workers.dev'
     const checks = []
 
-    // 1. KV namespace binding
-    checks.push({
-        id: 'kv',
-        label: 'KV namespace 已绑定 (JOURNAL_KV)',
-        status: env.JOURNAL_KV ? 'ok' : 'missing',
-        value: env.JOURNAL_KV ? '已绑定' : '未绑定',
-        hint: 'KV 用于缓存 journal 内容。需要在 Cloudflare 创建 KV namespace 并把 ID 填入 wrangler.toml。',
-        command: 'npx wrangler kv namespace create JOURNAL_KV'
-    })
-
     // 2. OWNER_DID
     const did = env.OWNER_DID
     checks.push({
@@ -83,7 +73,7 @@ export function checkSetup(env, journal) {
         label: 'Journal 已加载',
         status: journal && journal.loaded && journal.events.length > 0 ? 'ok' : (journal && journal.loaded ? 'warn' : 'missing'),
         value: journalState,
-        hint: 'Worker 从 KV / 静态资源 / JOURNAL_URL 加载 journal.ndjson 并验证链完整性。',
+        hint: 'Worker 从静态资源 ASSETS 加载 journal.ndjson 并验证链完整性（无 KV、无数据库）。',
         command: `curl https://${host}/refresh   # 手动触发重新加载`
     })
 
