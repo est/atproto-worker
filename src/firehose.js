@@ -41,6 +41,23 @@ export async function closeOnUnexpectedMessage(ws) {
 }
 
 /**
+ * Collect blob refs from a record (values shaped {$type: 'blob', ref: {$link}}).
+ * The relay verifies every blob referenced by a record is declared in the
+ * commit's `blobs` array, so this must walk the whole record.
+ */
+export function collectBlobRefs(value, refs = []) {
+    if (Array.isArray(value)) {
+        for (const item of value) collectBlobRefs(item, refs)
+    } else if (value && typeof value === 'object') {
+        if (value.$type === 'blob' && value.ref && value.ref.$link) {
+            refs.push({ $link: value.ref.$link })
+        }
+        for (const key of Object.keys(value)) collectBlobRefs(value[key], refs)
+    }
+    return refs
+}
+
+/**
  * Firehose Durable Object
  */
 export class Firehose {
@@ -297,7 +314,7 @@ export class Firehose {
                     path: `${event.collection}/${event.rkey}`,
                     cid: event.op === 'delete' ? null : { $link: event.recordCid || event.commitCid }
                 }],
-                blobs: []
+                blobs: collectBlobRefs(event.record)
             }
         } else {
             // Legacy fallback: empty CAR
@@ -316,7 +333,7 @@ export class Firehose {
                     path: `${event.collection}/${event.rkey}`,
                     cid: event.op === 'delete' ? null : { $link: event.cid }
                 }],
-                blobs: []
+                blobs: collectBlobRefs(event.record)
             }
         }
 

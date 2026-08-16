@@ -10,11 +10,12 @@
     "seal": "node cli/seal.js",
     "seal:init": "node cli/seal.js init",
     "seal:post": "node cli/seal.js post",
-    "test": "node tests/crypto.test.js && node tests/journal.test.js && node tests/interop.test.js && node tests/mst.test.js && node tests/mst-atcute.test.js && node tests/firehose.test.js && node tests/e2e.test.js"
+    "test": "node tests/crypto.test.js && node tests/journal.test.js && node tests/interop.test.js && node tests/mst.test.js && node tests/mst-atcute.test.js && node tests/firehose.test.js && node tests/blob.test.js && node tests/e2e.test.js"
   },
   "devDependencies": {
     "@atcute/mst": "^1.0.3",
     "@noble/secp256k1": "^2.1.0",
+    "image-size": "^2.0.2",
     "wrangler": "^3.47.0",
     "ws": "^8.19.0"
   }

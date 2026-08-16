@@ -102,20 +102,43 @@ export async function computeCID(value) {
 }
 
 /**
- * CID v1 (dag-cbor, sha2-256) of raw CBOR bytes.
+ * CID v1 (sha2-256) of raw bytes with the given codec.
+ * atproto records use dag-cbor (0x71); blobs use raw (0x55).
  */
-export async function computeCidFromBytes(cbor) {
-  const hash = await crypto.subtle.digest('SHA-256', cbor)
+export async function computeCidFromBytesCodec(bytes, codec) {
+  const hash = await crypto.subtle.digest('SHA-256', bytes)
 
-  // CID v1: version(1) + codec(dag-cbor=0x71) + hash-type(sha256=0x12) + hash-len(32) + hash
+  // CID v1: version(1) + codec(1) + hash-type(sha256=0x12) + hash-len(32) + hash
   const cid = new Uint8Array(2 + 2 + 32)
   cid[0] = 0x01
-  cid[1] = 0x71
+  cid[1] = codec
   cid[2] = 0x12
   cid[3] = 0x20
   cid.set(new Uint8Array(hash), 4)
 
   return 'b' + base32Encode(cid)
+}
+
+/**
+ * CID v1 (dag-cbor, sha2-256) of raw CBOR bytes.
+ */
+export async function computeCidFromBytes(cbor) {
+  return computeCidFromBytesCodec(cbor, 0x71)
+}
+
+/**
+ * CID of a blob's raw bytes (atproto blobs use the raw codec 0x55, so blob
+ * refs start with `bafkrei...` — NOT the dag-cbor `bafyrei...` prefix).
+ */
+export async function computeBlobCid(bytes) {
+  return computeCidFromBytesCodec(bytes, 0x55)
+}
+
+/**
+ * Validate a CID string: base32 multibase ('b') + base32lower payload.
+ */
+export function isValidCidString(cid) {
+  return typeof cid === 'string' && /^b[a-z2-7]{58}$/.test(cid)
 }
 
 /**

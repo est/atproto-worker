@@ -17,12 +17,13 @@ import path from 'node:path'
 import { generateKeypair, sign, publicKeyToMultibase, computeCID } from './crypto.js'
 import { JournalWriter } from './journal.js'
 import { RepoManager } from './repo.js'
-import { carToBase64 } from './atproto.js'
+import { carToBase64, buildImageEmbed } from './atproto.js'
 import { generateTID } from '../src/shared.js'
 
 const CONFIG_PATH = './config.json'
 const JOURNAL_PATH = './journal.ndjson'
 const STATE_PATH = './.repo-state.json'
+const UPLOADS_DIR = './public/uploads'
 
 /**
  * Load or create config
@@ -113,8 +114,10 @@ async function rotateKey() {
 
 /**
  * Create a post
+ * @param {string} text
+ * @param {{images?: Array<{path: string, alt?: string}>}} options
  */
-async function createPost(text) {
+async function createPost(text, options = {}) {
     const config = loadConfig()
     if (!config) {
         console.error('Not initialized. Run: node cli/sign.js init')
@@ -129,6 +132,19 @@ async function createPost(text) {
         $type: 'app.bsky.feed.post',
         text,
         createdAt: new Date().toISOString()
+    }
+
+    // Optional images: build the embed record and stage blob files into
+    // public/uploads/ (deployed with the Worker as static assets).
+    if (options.images && options.images.length > 0) {
+        const { embed, uploads } = await buildImageEmbed(options.images)
+        record.embed = embed
+        fs.mkdirSync(UPLOADS_DIR, { recursive: true })
+        for (const u of uploads) {
+            const file = path.join(UPLOADS_DIR, `${u.cid}.${u.ext}`)
+            fs.writeFileSync(file, u.bytes)
+            console.log(`  Blob: ${u.cid}.${u.ext} (${u.bytes.length} bytes)`)
+        }
     }
 
     // Apply write to repo -> commit v3 + blocks
@@ -415,6 +431,24 @@ function listRecords() {
     }
 }
 
+/**
+ * Parse `post` arguments: positional text + repeatable --image/--alt.
+ */
+function parsePostArgs(args) {
+    let text = 'Hello from atproto-worker!'
+    const images = []
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--image' && args[i + 1]) {
+            images.push({ path: args[++i] })
+        } else if (args[i] === '--alt' && args[i + 1]) {
+            images[images.length - 1] && (images[images.length - 1].alt = args[++i])
+        } else {
+            text = args[i]
+        }
+    }
+    return { text, images }
+}
+
 // Main CLI
 const command = process.argv[2]
 
@@ -425,9 +459,11 @@ switch (command) {
     case 'rotate-key':
         rotateKey()
         break
-    case 'post':
-        createPost(process.argv[3] || 'Hello from atproto-worker!')
+    case 'post': {
+        const { text, images } = parsePostArgs(process.argv.slice(3))
+        createPost(text, { images })
         break
+    }
     case 'like':
         createLike(process.argv[3], process.argv[4])
         break
@@ -450,7 +486,7 @@ ATProto Signing CLI
 Usage:
   node cli/seal.js init [did] [handle]   Initialize with keypair
   node cli/seal.js rotate-key            Generate a new keypair
-  node cli/seal.js post "text"           Create a post
+  node cli/seal.js post "text" [--image path.jpg] [--alt "描述"]   Create a post (up to 4 images)
   node cli/seal.js like <at-uri> <cid>   Like a post (requires subject CID)
   node cli/seal.js repost <at-uri> <cid> Repost (requires subject CID)
   node cli/seal.js follow did:...        Follow someone

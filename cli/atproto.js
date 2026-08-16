@@ -3,14 +3,54 @@
  * - commit v3 construction and signing (signCommit/verifyCommitSig)
  * - record CID computation (CID of the record itself, dag-cbor)
  * - CAR assembly for commit events (root = commit CID)
+ * - image embed construction (app.bsky.embed.images, blob refs)
  *
  * Signing follows the reference implementation exactly:
  *   sig = k256_lowS( sha256( CBOR({did, version:3, data, rev, prev}) ) )
  *   output is 64-byte compact raw bytes (hex here for JSON storage)
  */
 
-import { computeCID, commitToCbor, commitCid as canonicalCommitCid, createCarFile } from '../src/shared.js'
+import fs from 'node:fs'
+import { imageSize } from 'image-size'
+import { computeCID, computeBlobCid, commitToCbor, commitCid as canonicalCommitCid, createCarFile } from '../src/shared.js'
 import { sign, verify } from './crypto.js'
+
+const IMAGE_MIME = {
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+    gif: 'image/gif', webp: 'image/webp', avif: 'image/avif',
+}
+
+/**
+ * Build an app.bsky.embed.images record from local image files.
+ * @param {Array<{path: string, alt?: string}>} images - 1-4 images
+ * @returns {Promise<{embed: object, uploads: Array<{cid, ext, bytes}>}>}
+ *   uploads are the blob files the caller must stage (public/uploads/<cid>.<ext>)
+ */
+export async function buildImageEmbed(images) {
+    if (images.length < 1 || images.length > 4) {
+        throw new Error('app.bsky.embed.images supports 1-4 images')
+    }
+    const embedImages = []
+    const uploads = []
+    for (const { path, alt } of images) {
+        const bytes = fs.readFileSync(path)
+        const cid = await computeBlobCid(bytes)
+        const dims = imageSize(bytes)
+        const ext = (dims.type || path.split('.').pop() || 'bin').toLowerCase()
+        const mime = IMAGE_MIME[ext] || 'application/octet-stream'
+
+        const img = {
+            image: { $type: 'blob', ref: { $link: cid }, mimeType: mime, size: bytes.length },
+            alt: alt || '',
+        }
+        if (dims.width && dims.height) {
+            img.aspectRatio = { width: dims.width, height: dims.height }
+        }
+        embedImages.push(img)
+        uploads.push({ cid, ext, bytes })
+    }
+    return { embed: { $type: 'app.bsky.embed.images', images: embedImages }, uploads }
+}
 
 /**
  * Build the unsigned commit object.

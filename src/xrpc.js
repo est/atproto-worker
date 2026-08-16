@@ -4,7 +4,7 @@
  */
 
 import { resolveHandle, generateDidWebDocument } from './did.js'
-import { createCarFile, cborEncode, cborDecode, cidToBytes, encodeVarint, base32Encode, base64ToBytes } from './shared.js'
+import { createCarFile, cborEncode, cborDecode, cidToBytes, encodeVarint, base32Encode, base64ToBytes, isValidCidString } from './shared.js'
 
 function xrpcError(status, error, message) {
     return new Response(JSON.stringify({ error, message }), {
@@ -54,6 +54,9 @@ export async function handleXrpc(request, { journal, did, handle, env }) {
 
         case 'com.atproto.sync.getRepo':
             return handleGetRepo(url, journal, did)
+
+        case 'com.atproto.sync.getBlob':
+            return handleGetBlob(url, journal, did, env)
 
         case 'com.atproto.repo.describeRepo':
             return handleDescribeRepo(url, journal, handle, did, env)
@@ -429,6 +432,49 @@ function rebuildRepoCar(events, rootCid) {
         offset += part.length
     }
     return result
+}
+
+/**
+ * com.atproto.sync.getBlob
+ * Serve a blob (image/attachment) stored in Worker Static Assets.
+ * Blobs live at public/uploads/<cid>.<ext> (deployed alongside the journal
+ * asset), so the extension is probed from a fixed candidate list and maps
+ * to the mime type. Responses are edge-cached by CID.
+ */
+const BLOB_CANDIDATES = [
+    ['jpg', 'image/jpeg'],
+    ['jpeg', 'image/jpeg'],
+    ['png', 'image/png'],
+    ['gif', 'image/gif'],
+    ['webp', 'image/webp'],
+    ['avif', 'image/avif'],
+]
+
+async function handleGetBlob(url, journal, ownerDid, env) {
+    const did = url.searchParams.get('did')
+    const cid = url.searchParams.get('cid')
+
+    if (did !== ownerDid || !isValidCidString(cid)) {
+        return xrpcError(404, 'BlobNotFound', 'Blob not found')
+    }
+    if (!env.ASSETS) {
+        return xrpcError(404, 'BlobNotFound', 'Blob not found')
+    }
+
+    for (const [ext, mime] of BLOB_CANDIDATES) {
+        const resp = await env.ASSETS.fetch(`https://worker/uploads/${cid}.${ext}`)
+        if (resp.ok) {
+            return new Response(resp.body, {
+                status: 200,
+                headers: {
+                    'Content-Type': mime,
+                    'Cache-Control': 'public, max-age=86400'
+                }
+            })
+        }
+    }
+
+    return xrpcError(404, 'BlobNotFound', 'Blob not found')
 }
 
 /**
