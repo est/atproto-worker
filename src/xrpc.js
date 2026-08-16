@@ -22,6 +22,17 @@ function xrpcSuccess(data, status = 200) {
 }
 
 /**
+ * Deterministic read responses get Cache-Control so Workers Cache serves
+ * them WITHOUT running the Worker (no CPU billing, no journal reload).
+ */
+function cachedJson(data, maxAge = 60) {
+    return new Response(JSON.stringify(data), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${maxAge}` }
+    })
+}
+
+/**
  * Events of one hosted account (journal holds all accounts in one file).
  */
 function eventsForDid(journal, did) {
@@ -189,14 +200,14 @@ async function handleDescribeServer(url, did, handle, env, ownHost) {
     const didDoc = ident
         ? generateDidWebDocument(ident.handle, ident.handle, ident.publicKeyMultibase, did)
         : null
-    return xrpcSuccess({
+    return cachedJson({
         did: did,
         didDoc,
         availableUserDomains: [],
         inviteCodeRequired: false,
         phoneVerificationRequired: false,
         links: {}
-    })
+    }, 60)
 }
 
 /**
@@ -238,7 +249,7 @@ function handleListRepos(mainDid, journal, hosted) {
             rev: latest ? latest.rev : null
         })
     }
-    return xrpcSuccess({ repos })
+    return cachedJson({ repos }, 30)
 }
 
 /**
@@ -258,10 +269,10 @@ function handleGetLatestCommit(url, journal, hosted) {
 
     const latest = events[events.length - 1]
 
-    return xrpcSuccess({
+    return cachedJson({
         cid: latest.commitCid || latest.cid,
         rev: latest.rev
-    })
+    }, 30)
 }
 
 /**
@@ -278,11 +289,11 @@ function handleGetRepoStatus(url, journal, hosted) {
     const events = eventsForDid(journal, repoDid)
     const latest = events.length > 0 ? events[events.length - 1] : null
 
-    return xrpcSuccess({
+    return cachedJson({
         did: repoDid,
         active: true,
         rev: latest ? latest.rev : null
-    })
+    }, 30)
 }
 
 /**

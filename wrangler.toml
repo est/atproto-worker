@@ -10,6 +10,12 @@ compatibility_date = "2025-07-18"
 [triggers]
 crons = ["*/15 * * * *"]
 
+# Workers Cache: cache hits serve deterministic read responses WITHOUT
+# running the Worker (no CPU billing) — repeated reads of identity/status
+# endpoints skip the per-request journal load entirely.
+[cache]
+enabled = true
+
 # Static assets: journal.ndjson is deployed with the Worker.
 # JOURNAL_URL points back to this Worker's own /journal.ndjson,
 # so the whole setup is self-contained (no external static hosting).

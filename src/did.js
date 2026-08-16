@@ -11,7 +11,10 @@ export { isValidDID as validateDid } from './utils.js'
  */
 export function handleAtprotoDid(did) {
     return new Response(did, {
-        headers: { 'Content-Type': 'text/plain' }
+        headers: {
+            'Content-Type': 'text/plain',
+            'Cache-Control': 'public, max-age=300'
+        }
     })
 }
 
