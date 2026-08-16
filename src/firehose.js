@@ -3,16 +3,8 @@
  * Streams events from journal
  */
 
-import { cborEncode, createCarFile } from './shared.js'
+import { cborEncode, createCarFile, base64ToBytes } from './shared.js'
 import { Journal } from './journal.js'
-
-// Base64 (standard) -> Uint8Array (works in both CF Workers and Node.js)
-function base64ToBytes(b64) {
-    const bin = atob(b64)
-    const bytes = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-    return bytes
-}
 
 // Connection limits for the firehose. A client whose stream dies right after
 // the upgrade (e.g. a relay failing commit verification) will otherwise

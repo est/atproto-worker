@@ -9,8 +9,7 @@
  *   output is 64-byte compact raw bytes (hex here for JSON storage)
  */
 
-import { webcrypto } from 'node:crypto'
-import { cborEncode, computeCID, cidToBytes, encodeVarint, commitToCbor, commitCid as canonicalCommitCid } from '../src/shared.js'
+import { computeCID, commitToCbor, commitCid as canonicalCommitCid, createCarFile } from '../src/shared.js'
 import { sign, verify } from './crypto.js'
 
 /**
@@ -68,38 +67,13 @@ export async function commitCid(commit) {
 
 /**
  * Assemble a CAR v1 file with the commit as root.
+ * Single implementation lives in src/shared.js (createCarFile); re-exported
+ * here under the historical name `createCar`.
  * @param {string} rootCid - commit CID (also root of the CAR)
  * @param {Array<{cid: string, data: any}>} blocks - extra blocks (MST nodes, records)
  * @returns {Uint8Array}
  */
-export function createCar(rootCid, blocks = []) {
-  const parts = []
-
-  const header = cborEncode({
-    version: 1,
-    roots: [{ $link: rootCid }]
-  })
-  parts.push(encodeVarint(header.length))
-  parts.push(header)
-
-  for (const block of blocks) {
-    const cidBytes = cidToBytes(block.cid)
-    const blockData = block.data instanceof Uint8Array ? block.data : cborEncode(block.data)
-    parts.push(encodeVarint(cidBytes.length + blockData.length))
-    parts.push(cidBytes)
-    parts.push(blockData)
-  }
-
-  const totalLength = parts.reduce((sum, p) => sum + p.length, 0)
-  const result = new Uint8Array(totalLength)
-  let offset = 0
-  for (const part of parts) {
-    result.set(part, offset)
-    offset += part.length
-  }
-
-  return result
-}
+export { createCarFile as createCar }
 
 /**
  * Encode a CAR file to base64 string for storage in JSON journal lines.

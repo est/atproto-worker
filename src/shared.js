@@ -9,6 +9,16 @@ const B32_SORTISH = '234567abcdefghijklmnopqrstuvwxyz'
 let lastTimestamp = 0
 let clockSeq = 0
 
+/**
+ * Base64 (standard) -> Uint8Array (works in both CF Workers and Node.js).
+ */
+export function base64ToBytes(b64) {
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return bytes
+}
+
 export function generateTID() {
   let timestamp = Date.now() * 1000 // microseconds
 

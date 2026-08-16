@@ -4,14 +4,7 @@
  */
 
 import { resolveHandle, generateDidWebDocument } from './did.js'
-import { createCarFile, cborEncode, cborDecode, cidToBytes, encodeVarint, base32Encode } from './shared.js'
-
-function base64ToBytes(b64) {
-    const bin = atob(b64)
-    const bytes = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-    return bytes
-}
+import { createCarFile, cborEncode, cborDecode, cidToBytes, encodeVarint, base32Encode, base64ToBytes } from './shared.js'
 
 function xrpcError(status, error, message) {
     return new Response(JSON.stringify({ error, message }), {

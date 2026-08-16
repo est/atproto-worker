@@ -79,20 +79,3 @@ async function syncReposts(journal, ownerDid) {
         }
     }
 }
-
-export async function syncFollowers(journal, ownerDid) {
-    // Log-only (ADR-015): no persistence.
-    try {
-        const resp = await fetch(
-            `${BSKY_API}/xrpc/app.bsky.graph.getFollowers?actor=${encodeURIComponent(ownerDid)}&limit=50`,
-            { headers: { 'Accept': 'application/json' } }
-        )
-
-        if (resp.ok) {
-            const data = await resp.json()
-            console.log(`Has ${data.followers?.length || 0} followers`)
-        }
-    } catch (e) {
-        console.error('Error fetching followers:', e)
-    }
-}
