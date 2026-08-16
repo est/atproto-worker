@@ -114,7 +114,7 @@ function handleGetRecord(url, journal, ownerDid) {
 
     return xrpcSuccess({
         uri: `at://${ownerDid}/${collection}/${rkey}`,
-        cid: event.cid,
+        cid: event.recordCid || event.commitCid || event.cid,
         value: event.record
     })
 }
@@ -141,7 +141,7 @@ function handleListRecords(url, journal, ownerDid) {
     return xrpcSuccess({
         records: result.records.map(e => ({
             uri: `at://${ownerDid}/${collection}/${e.rkey}`,
-            cid: e.cid,
+            cid: e.recordCid || e.commitCid || e.cid,
             value: e.record
         })),
         cursor: result.cursor
@@ -222,7 +222,7 @@ function handleListRepos(did, journal) {
     return xrpcSuccess({
         repos: [{
             did,
-            head: latest ? latest.cid : null,
+            head: latest ? (latest.commitCid || latest.cid) : null,
             rev: latest ? latest.rev : null
         }]
     })
@@ -245,7 +245,7 @@ function handleGetLatestCommit(url, journal, ownerDid) {
     const latest = journal.events[journal.events.length - 1]
 
     return xrpcSuccess({
-        cid: latest.cid,
+        cid: latest.commitCid || latest.cid,
         rev: latest.rev
     })
 }
@@ -316,7 +316,9 @@ function handleGetRepo(url, journal, ownerDid) {
 
 /**
  * Read a LEB128 varint from a byte array starting at `pos`.
- * Throws if the varint is unterminated (EOF before the continuation bit clears).
+ * Accumulates in Number (the old `|=` coerced to int32 and silently wrapped
+ * for 5+ byte varints); throws on EOF or if it would exceed the safe
+ * integer range.
  */
 function readCarVarint(carBytes, pos) {
     let value = 0
@@ -326,11 +328,11 @@ function readCarVarint(carBytes, pos) {
             throw new Error('CAR varint is truncated: unexpected end of data')
         }
         const b = carBytes[pos++]
-        value |= (b & 0x7f) << shift
+        value += (b & 0x7f) * Math.pow(2, shift)
         if (!(b & 0x80)) return { value, pos }
         shift += 7
-        if (shift > 63) {
-            throw new Error('CAR varint is too long (exceeds 64-bit range)')
+        if (shift > 53) {
+            throw new Error('CAR varint is too long (exceeds safe integer range)')
         }
     }
 }
@@ -338,10 +340,14 @@ function readCarVarint(carBytes, pos) {
 /**
  * Merge all per-commit CAR blocks from the journal into a single CAR
  * rooted at the latest commit. Returns Uint8Array.
- * @throws {Error} If any CAR data is malformed, truncated, or contains trailing garbage.
+ * @throws {Error} If any CAR data is malformed, truncated, contains trailing
+ * garbage, or exceeds the total size cap.
  */
+const MAX_CAR_REBUILD_BYTES = 64 * 1024 * 1024 // 64 MB guard
+
 function rebuildRepoCar(events, rootCid) {
     const allBlocks = new Map()
+    let totalBytes = 0
 
     for (const event of events) {
         if (!event.blocksB64) continue
@@ -380,12 +386,24 @@ function rebuildRepoCar(events, rootCid) {
             }
             const blockBytes = carBytes.slice(pos, pos + blockLen)
             pos += blockLen
-            if (blockBytes.length < 36) {
-                throw new Error('CAR block is too short to contain a CID')
+            totalBytes += blockBytes.length
+            if (totalBytes > MAX_CAR_REBUILD_BYTES) {
+                throw new Error(`CAR rebuild exceeds ${MAX_CAR_REBUILD_BYTES} bytes`)
             }
-            const cidBytes = blockBytes.slice(0, 36)
+
+            // CID v1: version(1) + codec(1) + multihash(type(1) + len(1) + digest).
+            // Parse the digest length instead of assuming a fixed 36 bytes, so
+            // non-sha256 CIDs don't leak bytes into the block data.
+            if (blockBytes.length < 4 || blockBytes[0] !== 1) {
+                throw new Error('CAR block is missing a CID v1 header')
+            }
+            const cidLen = 2 + 2 + blockBytes[3]
+            if (blockBytes.length < cidLen) {
+                throw new Error('CAR block is too short to contain its CID')
+            }
+            const cidBytes = blockBytes.slice(0, cidLen)
             const cidStr = 'b' + base32Encode(cidBytes)
-            allBlocks.set(cidStr, blockBytes.slice(36))
+            allBlocks.set(cidStr, blockBytes.slice(cidLen))
         }
 
         // Allow trailing zero padding; anything else is corruption

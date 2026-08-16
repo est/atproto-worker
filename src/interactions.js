@@ -4,6 +4,17 @@
  */
 
 const BSKY_API = 'https://public.api.bsky.app'
+const FETCH_TIMEOUT_MS = 10_000
+
+async function bskyFetch(url) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    try {
+        return await fetch(url, { headers: { 'Accept': 'application/json' }, signal: controller.signal })
+    } finally {
+        clearTimeout(timer)
+    }
+}
 
 /**
  * Fetch and store interactions for the owner's posts
@@ -30,9 +41,8 @@ async function syncLikes(journal, ownerDid) {
         const postUri = `at://${ownerDid}/app.bsky.feed.post/${post.rkey}`
 
         try {
-            const resp = await fetch(
-                `${BSKY_API}/xrpc/app.bsky.feed.getLikes?uri=${encodeURIComponent(postUri)}&limit=50`,
-                { headers: { 'Accept': 'application/json' } }
+            const resp = await bskyFetch(
+                `${BSKY_API}/xrpc/app.bsky.feed.getLikes?uri=${encodeURIComponent(postUri)}&limit=50`
             )
 
             if (!resp.ok) continue
@@ -56,9 +66,8 @@ async function syncReposts(journal, ownerDid) {
         const postUri = `at://${ownerDid}/app.bsky.feed.post/${post.rkey}`
 
         try {
-            const resp = await fetch(
-                `${BSKY_API}/xrpc/app.bsky.feed.getRepostedBy?uri=${encodeURIComponent(postUri)}&limit=50`,
-                { headers: { 'Accept': 'application/json' } }
+            const resp = await bskyFetch(
+                `${BSKY_API}/xrpc/app.bsky.feed.getRepostedBy?uri=${encodeURIComponent(postUri)}&limit=50`
             )
 
             if (!resp.ok) continue

@@ -265,7 +265,12 @@ export function renderChecklistPage(env, journal, host) {
 </html>`
 
     return new Response(html, {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'X-Content-Type-Options': 'nosniff',
+            'Referrer-Policy': 'no-referrer',
+            'Strict-Transport-Security': 'max-age=63072000'
+        }
     })
 }
 

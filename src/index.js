@@ -14,6 +14,7 @@ import { renderChecklistPage } from './setup.js'
 
 // Re-export Durable Object
 export { Firehose } from './firehose.js'
+export { broadcastNewEvents }
 
 export default {
     /**
@@ -62,18 +63,28 @@ export default {
         try {
             let response
 
-            // Refresh endpoint - sync journal from HTTP source
+            // Refresh endpoint - sync journal from HTTP source.
+            // Optional shared-secret gate: if REFRESH_TOKEN is set, require
+            // `Authorization: Bearer <token>` — otherwise anyone can burn
+            // worker/KV quota by hammering this endpoint.
             if (path === '/refresh') {
-                await journal.refresh()
-                const newEvents = await broadcastNewEvents(journal, env, ctx)
+                if (env.REFRESH_TOKEN && request.headers.get('Authorization') !== `Bearer ${env.REFRESH_TOKEN}`) {
+                    response = new Response(JSON.stringify({
+                        error: 'Unauthorized',
+                        message: 'Missing or invalid refresh token'
+                    }), { status: 401, headers: { 'Content-Type': 'application/json' } })
+                } else {
+                    await journal.refresh()
+                    const newEvents = await broadcastNewEvents(journal, env, ctx)
 
-                response = new Response(JSON.stringify({
-                    ok: true,
-                    message: `Journal refreshed, ${newEvents.length} new events broadcasted`,
-                    eventCount: journal.events.length
-                }), {
-                    headers: { 'Content-Type': 'application/json' }
-                })
+                    response = new Response(JSON.stringify({
+                        ok: true,
+                        message: `Journal refreshed, ${newEvents.length} new events broadcasted`,
+                        eventCount: journal.events.length
+                    }), {
+                        headers: { 'Content-Type': 'application/json' }
+                    })
+                }
             }
             // Well-known endpoints
             else if (path === '/.well-known/atproto-did') {
@@ -165,7 +176,19 @@ export default {
         }
 
         // Sync interactions (these go to separate KV, not journal)
-        ctx.waitUntil(syncInteractions(journal, did, handle))
+        // Sync interactions (these go to separate KV, not journal).
+        // Throttled to every 6h: each run makes up to 40 external bsky
+        // fetches whose results are only logged (see ADR-015), so running
+        // them every 15 min is wasted work and quota.
+        if (env.JOURNAL_KV) {
+            const lastInteractions = parseInt(await env.JOURNAL_KV.get('interactions-last')) || 0
+            if (Date.now() - lastInteractions >= INTERACTIONS_THROTTLE_MS) {
+                ctx.waitUntil(syncInteractions(journal, did, handle).then(
+                    () => env.JOURNAL_KV.put('interactions-last', String(Date.now())),
+                    () => {}
+                ))
+            }
+        }
 
         // Declare ourselves to the relay (like the reference PDS
         // Crawlers.notifyOfUpdate, 20-min throttle). Lets the relay know
@@ -178,6 +201,7 @@ export default {
 
 const RELAY_CRAWL_URL = 'https://bsky.network/xrpc/com.atproto.sync.requestCrawl'
 const RELAY_NOTIFY_THROTTLE_MS = 20 * 60 * 1000 // 20 min
+const INTERACTIONS_THROTTLE_MS = 6 * 60 * 60 * 1000 // 6 h
 const FIREHOSE_CURSOR_KEY = 'firehose-cursor'
 
 /**
@@ -185,23 +209,32 @@ const FIREHOSE_CURSOR_KEY = 'firehose-cursor'
  * firehose subscribers. The cursor is persisted in KV so it survives across
  * requests — the journal is a static asset, so a CID-diff between load() and
  * refresh() (both reading the same ASSETS) would never detect new events.
+ *
+ * The cursor advances ONLY after the DO broadcast succeeds, and never
+ * backwards (monotonic max) so concurrent refreshes can't drop or regress it.
  * @returns {Promise<Array>} the events that were broadcast
  */
 async function broadcastNewEvents(journal, env, ctx) {
     if (!env.FIREHOSE || !env.JOURNAL_KV) return []
 
     const lastOffset = parseInt(await env.JOURNAL_KV.get(FIREHOSE_CURSOR_KEY)) || -1
-    const newEvents = journal.getEventsFromCursor(lastOffset)
+    const newEvents = journal.events.filter(e => e.offset > lastOffset)
     if (newEvents.length === 0) return []
 
     const id = env.FIREHOSE.idFromName('main')
     const stub = env.FIREHOSE.get(id)
-    ctx.waitUntil(stub.fetch('http://localhost/broadcast', {
+    const resp = await stub.fetch('http://localhost/broadcast', {
         method: 'POST',
         body: JSON.stringify({ events: newEvents }),
         headers: { 'Content-Type': 'application/json' }
-    }))
-    await env.JOURNAL_KV.put(FIREHOSE_CURSOR_KEY, String(newEvents[newEvents.length - 1].offset))
+    })
+    if (!resp.ok) {
+        console.error(`[firehose] broadcast failed (${resp.status}), cursor not advanced`)
+        return []
+    }
+
+    const nextCursor = Math.max(lastOffset, newEvents[newEvents.length - 1].offset)
+    await env.JOURNAL_KV.put(FIREHOSE_CURSOR_KEY, String(nextCursor))
     return newEvents
 }
 

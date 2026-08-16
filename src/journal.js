@@ -110,8 +110,17 @@ export class Journal {
     async validate(events) {
         let prevCid = null
         let prevCommitCid = null
+        let prevOffset = -1
 
         for (const event of events) {
+            // Offsets must be strictly increasing: the KV firehose cursor and
+            // listRecords cursors key off offsets, so a rebuilt (non-append)
+            // journal silently invalidates them.
+            if (event.offset !== undefined && event.offset !== null && event.offset <= prevOffset) {
+                throw new Error(`Journal offsets not strictly increasing at offset ${event.offset}`)
+            }
+            if (typeof event.offset === 'number') prevOffset = event.offset
+
             // Check prev chain
             if (event.prev !== prevCid) {
                 throw new Error(`Journal chain broken at offset ${event.offset}: expected prev=${prevCid}, got ${event.prev}`)

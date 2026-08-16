@@ -2,7 +2,7 @@
  * DID and identity handling for AT Protocol PDS
  */
 
-import { isValidDID } from './utils.js'
+import { isValidDID, isValidHandle } from './utils.js'
 
 export { isValidDID as validateDid } from './utils.js'
 
@@ -97,16 +97,24 @@ export async function resolveHandle(handle, ownerHandle, ownerDid) {
         return ownerDid
     }
 
-    // For external handles, try to resolve via DNS or HTTP
-    // First, try /.well-known/atproto-did on the handle's domain
+    // For external handles, try to resolve via DNS or HTTP.
+    // First, try /.well-known/atproto-did on the handle's domain.
+    // Guard against SSRF: only valid handle syntax, hard timeout, size cap.
+    if (!isValidHandle(handle)) return null
+
     try {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 5000)
         const url = `https://${handle}/.well-known/atproto-did`
         const resp = await fetch(url, {
             headers: { 'Accept': 'text/plain' },
+            signal: controller.signal,
             cf: { cacheTtl: 300 } // Cache for 5 minutes
         })
+        clearTimeout(timer)
         if (resp.ok) {
-            const did = (await resp.text()).trim()
+            const text = await resp.text()
+            const did = text.trim().slice(0, 2048)
             if (did.startsWith('did:')) {
                 return did
             }

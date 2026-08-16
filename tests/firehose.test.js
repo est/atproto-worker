@@ -318,3 +318,64 @@ test('firehose - handleWebSocket requires a websocket upgrade', async () => {
     const res = await firehose.handleWebSocket(req, new URL('http://localhost/subscribe'))
     assert.strictEqual(res.status, 426)
 })
+
+test('firehose - global connect cap protects against multi-IP floods', async () => {
+    const firehose = new Firehose(fakeWsState(), { JOURNAL_CONTENT: '', OWNER_DID: DID })
+    const url = new URL('http://localhost/subscribe')
+
+    let last
+    for (let i = 0; i < 15; i++) {
+        last = await firehose.handleWebSocket(wsRequest(`10.0.0.${i}`, 'bot'), url)
+    }
+    assert.strictEqual(last.switchingProtocols, true)
+
+    const rejected = await firehose.handleWebSocket(wsRequest('10.0.0.99', 'bot'), url)
+    assert.strictEqual(rejected.status, 429)
+})
+
+test('firehose - per-IP socket cap rejects a second socket from the same IP', async () => {
+    const open = Array.from({ length: 2 }, () => ({
+        deserializeAttachment: () => ({ ip: '1.1.1.1' })
+    }))
+    const firehose = new Firehose(fakeWsState(open), { JOURNAL_CONTENT: '', OWNER_DID: DID })
+
+    // same IP already holds 2 sockets -> 503
+    const same = await firehose.handleWebSocket(wsRequest('1.1.1.1'), new URL('http://localhost/subscribe'))
+    assert.strictEqual(same.status, 503)
+
+    // a different IP is fine (2 open < global cap 8)
+    const other = await firehose.handleWebSocket(wsRequest('2.2.2.2'), new URL('http://localhost/subscribe'))
+    assert.strictEqual(other.switchingProtocols, true)
+})
+
+test('firehose - unexpected client message closes the socket', async () => {
+    let closed = false
+    const ws = { close: () => { closed = true } }
+    const firehose = makeFirehose({})
+    await firehose.webSocketMessage(ws, 'garbage')
+    assert.strictEqual(closed, true)
+})
+
+test('firehose - backfill pages through more than 1000 events', async () => {
+    const JOURNAL = './test-firehose-big-journal.ndjson'
+    if (fs.existsSync(JOURNAL)) fs.unlinkSync(JOURNAL)
+    const writer = new JournalWriter(JOURNAL)
+
+    const N = 1005
+    for (let i = 0; i < N; i++) {
+        await writer.append({
+            op: 'create', collection: 'app.bsky.feed.post', rkey: `3p${i}`,
+            record: { text: `post ${i}` }, did: DID, rev: `3aa${i}`
+        })
+    }
+    const content = fs.readFileSync(JOURNAL, 'utf-8')
+    fs.unlinkSync(JOURNAL)
+
+    const ws = fakeWs()
+    const firehose = makeFirehose({ JOURNAL_CONTENT: content, OWNER_DID: DID })
+    await firehose.backfill(ws, -1)
+
+    assert.strictEqual(ws.sent.length, N)
+    const lastEvent = content.trim().split('\n').map(JSON.parse).pop()
+    assert.deepStrictEqual(ws.attachment, { cursor: lastEvent.offset })
+})

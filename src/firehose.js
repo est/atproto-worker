@@ -23,7 +23,9 @@ function base64ToBytes(b64) {
 // which does trigger client-side backoff.
 export const CONNECT_WINDOW_MS = 60_000
 export const MAX_CONNECTS_PER_WINDOW = 8
+export const MAX_GLOBAL_CONNECTS_PER_WINDOW = 15
 export const MAX_CONCURRENT_SOCKETS = 8
+export const MAX_SOCKETS_PER_IP = 2
 
 /**
  * Sliding-window connect limiter decision. `recentAttempts` are timestamps
@@ -33,6 +35,17 @@ export const MAX_CONCURRENT_SOCKETS = 8
 export function shouldAllowConnect(recentAttempts, now, max = MAX_CONNECTS_PER_WINDOW, windowMs = CONNECT_WINDOW_MS) {
     const recent = recentAttempts.filter(t => now - t < windowMs)
     return { allowed: recent.length < max, recent }
+}
+
+// Every inbound WS message to a hibernating DO is one DO request, and
+// subscribeRepos is server→client only — any data message is client
+// misbehavior. Close instead of just logging so a client can't burn quota.
+export async function closeOnUnexpectedMessage(ws) {
+    try {
+        ws.close(1008, 'Unexpected message')
+    } catch (e) {
+        // socket already gone
+    }
 }
 
 /**
@@ -71,22 +84,30 @@ export class Firehose {
 
         const cfConnectingIp = request.headers.get('CF-Connecting-IP') || 'unknown'
         const userAgent = request.headers.get('User-Agent') || 'unknown'
+        const now = Date.now()
+
+        // Global connect cap: per-IP limits don't protect the DO quota from
+        // multi-IP clients; every attempt (allowed or rejected) is one DO
+        // request, so cap the total across all IPs.
+        const globalKey = 'ws-attempts:global'
+        const globalPrev = (await this.safeStorageGet(globalKey)) || []
+        const globalLimit = shouldAllowConnect(globalPrev, now, MAX_GLOBAL_CONNECTS_PER_WINDOW)
+        if (!globalLimit.allowed) {
+            console.warn(`[firehose] global connect rate-limit hit from ${cfConnectingIp} (${userAgent})`)
+            return this.rateLimitResponse()
+        }
 
         // Per-IP connect rate limit (protects the DO free-tier quota from
         // reconnect storms; see shouldAllowConnect).
         const ipKey = `ws-attempts:${cfConnectingIp}`
-        const prevAttempts = (await this.state.storage.get(ipKey)) || []
-        const { allowed, recent } = shouldAllowConnect(prevAttempts, Date.now())
+        const prevAttempts = (await this.safeStorageGet(ipKey)) || []
+        const { allowed, recent } = shouldAllowConnect(prevAttempts, now)
         if (!allowed) {
             console.warn(`[firehose] rate-limiting WS connects from ${cfConnectingIp} (${userAgent}): ${recent.length} in the last minute`)
-            return new Response(JSON.stringify({
-                error: 'RateLimited',
-                message: 'Too many connection attempts, retry later'
-            }), { status: 429, headers: { 'Content-Type': 'application/json' } })
+            return this.rateLimitResponse()
         }
-        await this.state.storage.put(ipKey, [...recent, Date.now()], { expirationTtl: 120 })
 
-        // Cap concurrent sockets so one client can't pile up open connections
+        // Socket caps (global + per-IP) so one client can't hold all slots.
         const openSockets = this.state.getWebSockets()
         if (openSockets.length >= MAX_CONCURRENT_SOCKETS) {
             console.warn(`[firehose] rejecting WS connect from ${cfConnectingIp}: ${openSockets.length} sockets open`)
@@ -95,6 +116,19 @@ export class Firehose {
                 message: 'Too many active connections'
             }), { status: 503, headers: { 'Content-Type': 'application/json' } })
         }
+        const mySockets = openSockets.filter(s => (s.deserializeAttachment ? (s.deserializeAttachment() || {}).ip : null) === cfConnectingIp)
+        if (mySockets.length >= MAX_SOCKETS_PER_IP) {
+            console.warn(`[firehose] rejecting WS connect from ${cfConnectingIp}: already has ${mySockets.length} sockets`)
+            return new Response(JSON.stringify({
+                error: 'TooManyClients',
+                message: 'Too many connections from this IP'
+            }), { status: 503, headers: { 'Content-Type': 'application/json' } })
+        }
+
+        // Record attempts only after every rejection check, so rejected
+        // clients don't burn other clients' rate-limit budget.
+        await this.safeStoragePut(ipKey, [...recent, now], { expirationTtl: 120 })
+        await this.safeStoragePut(globalKey, [...globalLimit.recent, now], { expirationTtl: 120 })
 
         const cursorParam = url.searchParams.get('cursor')
         const cursor = cursorParam === null || Number.isNaN(parseInt(cursorParam)) ? null : parseInt(cursorParam)
@@ -104,7 +138,7 @@ export class Firehose {
 
         // Need to accept the server-side websocket via state to handle events
         this.state.acceptWebSocket(server)
-        server.serializeAttachment({ cursor })
+        server.serializeAttachment({ cursor, ip: cfConnectingIp })
 
         // Backfill from journal: no cursor = new subscriber, send everything
         // (matches relay expectations: a fresh host subscription gets the
@@ -116,6 +150,31 @@ export class Firehose {
         return new Response(null, { status: 101, webSocket: client })
     }
 
+    rateLimitResponse() {
+        return new Response(JSON.stringify({
+            error: 'RateLimited',
+            message: 'Too many connection attempts, retry later'
+        }), { status: 429, headers: { 'Content-Type': 'application/json' } })
+    }
+
+    // Storage failures must not break legitimate subscribers: fail open.
+    async safeStorageGet(key) {
+        try {
+            return await this.state.storage.get(key)
+        } catch (e) {
+            console.error('[firehose] storage.get failed:', e.message)
+            return null
+        }
+    }
+
+    async safeStoragePut(key, value, opts) {
+        try {
+            await this.state.storage.put(key, value, opts)
+        } catch (e) {
+            console.error('[firehose] storage.put failed:', e.message)
+        }
+    }
+
     /**
      * Backfill events from journal
      */
@@ -125,25 +184,32 @@ export class Firehose {
             const journal = new Journal(this.env)
             await journal.load()
 
-            const allEvents = journal.getEventsFromCursor(cursor, 1000)
+            // Page through the whole journal past the cursor — a fresh
+            // subscriber must get every event or it indexes a partial repo.
+            let lastOffset = cursor
+            while (true) {
+                const batch = journal.getEventsFromCursor(lastOffset, 1000)
+                if (batch.length === 0) break
 
-            // Filter by OWNER_DID
-            const events = allEvents.filter(e => e.did === this.env.OWNER_DID)
+                // Filter by OWNER_DID
+                const events = batch.filter(e => e.did === this.env.OWNER_DID)
 
-            for (const event of events) {
-                const message = this.formatEvent(event)
+                for (const event of events) {
+                    const message = this.formatEvent(event)
 
-                try {
-                    ws.send(message)
-                } catch (e) {
-                    return // Client disconnected
+                    try {
+                        ws.send(message)
+                    } catch (e) {
+                        return // Client disconnected
+                    }
                 }
+
+                lastOffset = batch[batch.length - 1].offset
             }
 
-            // Update cursor based on actual journal offset, 
+            // Update cursor based on actual journal offset,
             // even if filtered out, so we don't re-process
-            if (allEvents.length > 0) {
-                const lastOffset = allEvents[allEvents.length - 1].offset
+            if (lastOffset !== cursor) {
                 ws.serializeAttachment({ cursor: lastOffset })
             }
         } catch (e) {
@@ -268,9 +334,11 @@ export class Firehose {
     }
 
     async webSocketMessage(ws, message) {
-        // Client shouldn't send messages for subscribeRepos
-        // But we should handle it gracefully
-        console.warn('Unexpected message from client')
+        // subscribeRepos is server→client only. Any inbound data message is
+        // client misbehavior — and each one bills a DO request — so close
+        // the socket instead of just logging.
+        console.warn('Unexpected message from client, closing socket')
+        await closeOnUnexpectedMessage(ws)
     }
 
     async webSocketClose(ws, code, reason) {
