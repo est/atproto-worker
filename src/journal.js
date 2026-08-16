@@ -56,7 +56,35 @@ export class Journal {
             this.index()
         }
 
+        // Publishing-account registry (deployed asset, may not exist).
+        this.accounts = []
+        if (this.env.ASSETS) {
+            const resp = await this.env.ASSETS.fetch('https://worker/accounts.json')
+            if (resp.ok) {
+                try {
+                    this.accounts = (await resp.json()).accounts || []
+                } catch (e) {
+                    this.accounts = []
+                }
+            }
+        }
+
         this.loaded = true
+    }
+
+    /**
+     * DIDs hosted by this PDS: the publishing accounts from the registry,
+     * plus the main did:web identity passed by the caller.
+     */
+    hostedDids(mainDid) {
+        return new Set([mainDid, ...this.accounts.map(a => a.did)])
+    }
+
+    /**
+     * Resolve an account registry entry by did, or null.
+     */
+    accountForDid(did) {
+        return this.accounts.find(a => a.did === did) || null
     }
 
     /**
@@ -103,13 +131,15 @@ export class Journal {
     }
 
     /**
-     * Validate journal chain integrity (CID chain and prev links)
-     * New format: commitCid chain + commit object CID. Legacy: event CID chain.
+     * Validate journal chain integrity (CID chain and prev links).
+     * The journal holds events from all hosted accounts in one file, so
+     * chain integrity is tracked PER DID (each account has its own commit
+     * chain). Offsets stay globally monotonic (single file = firehose seq).
      * Throws on validation failure
      */
     async validate(events) {
-        let prevCid = null
-        let prevCommitCid = null
+        const prevCidByDid = new Map()
+        const prevCommitCidByDid = new Map()
         let prevOffset = -1
 
         for (const event of events) {
@@ -121,7 +151,10 @@ export class Journal {
             }
             if (typeof event.offset === 'number') prevOffset = event.offset
 
-            // Check prev chain
+            const did = event.did || ''
+            const prevCid = prevCidByDid.get(did) || null
+
+            // Check prev chain (per did)
             if (event.prev !== prevCid) {
                 throw new Error(`Journal chain broken at offset ${event.offset}: expected prev=${prevCid}, got ${event.prev}`)
             }
@@ -135,10 +168,11 @@ export class Journal {
                 if (event.commitCid !== expectedCommitCid) {
                     throw new Error(`Commit CID mismatch at offset ${event.offset}: expected ${expectedCommitCid}, got ${event.commitCid}`)
                 }
+                const prevCommitCid = prevCommitCidByDid.get(did) || null
                 if (event.commit.prev !== prevCommitCid) {
                     throw new Error(`Commit chain broken at offset ${event.offset}: expected prev=${prevCommitCid}, got ${event.commit.prev}`)
                 }
-                prevCommitCid = event.commitCid
+                prevCommitCidByDid.set(did, event.commitCid)
             } else if (event.cid) {
                 // Legacy format: event CID chain
                 const expectedCid = await computeCID({
@@ -154,26 +188,28 @@ export class Journal {
                 }
             }
 
-            prevCid = event.commitCid || event.cid || null
+            prevCidByDid.set(did, event.commitCid || event.cid || null)
         }
 
         return true
     }
 
     /**
-     * Index events for fast lookup
+     * Index events for fast lookup, namespaced by did so multiple accounts
+     * in one journal don't collide on rkeys.
      */
     index() {
         this.byCollection = new Map()
         this.byUri = new Map()
 
         for (const event of this.events) {
-            const key = `${event.collection}/${event.rkey}`
+            const key = `${event.did}/${event.collection}/${event.rkey}`
+            const colKey = `${event.did}/${event.collection}`
 
             if (event.op === 'delete') {
                 this.byUri.delete(key)
                 // Remove from collection
-                const col = this.byCollection.get(event.collection)
+                const col = this.byCollection.get(colKey)
                 if (col) {
                     const idx = col.findIndex(e => e.rkey === event.rkey)
                     if (idx >= 0) col.splice(idx, 1)
@@ -181,10 +217,10 @@ export class Journal {
             } else {
                 this.byUri.set(key, event)
 
-                if (!this.byCollection.has(event.collection)) {
-                    this.byCollection.set(event.collection, [])
+                if (!this.byCollection.has(colKey)) {
+                    this.byCollection.set(colKey, [])
                 }
-                const col = this.byCollection.get(event.collection)
+                const col = this.byCollection.get(colKey)
                 const idx = col.findIndex(e => e.rkey === event.rkey)
                 if (idx >= 0) {
                     col[idx] = event
@@ -196,17 +232,17 @@ export class Journal {
     }
 
     /**
-     * Get current state of a record
+     * Get current state of a record for a specific account
      */
-    getRecord(collection, rkey) {
-        return this.byUri.get(`${collection}/${rkey}`) || null
+    getRecord(did, collection, rkey) {
+        return this.byUri.get(`${did}/${collection}/${rkey}`) || null
     }
 
     /**
-     * List records in a collection
+     * List records in a collection for a specific account
      */
-    listRecords(collection, { limit = 50, cursor } = {}) {
-        const records = this.byCollection.get(collection) || []
+    listRecords(did, collection, { limit = 50, cursor } = {}) {
+        const records = this.byCollection.get(`${did}/${collection}`) || []
 
         // Sort by offset descending (newest first)
         const sorted = [...records].sort((a, b) => b.offset - a.offset)

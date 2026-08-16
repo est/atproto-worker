@@ -24,6 +24,112 @@ const CONFIG_PATH = './config.json'
 const JOURNAL_PATH = './journal.ndjson'
 const STATE_PATH = './.repo-state.json'
 const UPLOADS_DIR = './public/uploads'
+const ACCOUNTS_REGISTRY = './public/accounts.json'   // deployed with the Worker (public info)
+const ACCOUNTS_LOCAL = './config.accounts.json'      // local only, holds private keys (gitignored)
+
+/**
+ * Load local account configs (private keys). Gitignored.
+ */
+function loadAccountsLocal() {
+    if (fs.existsSync(ACCOUNTS_LOCAL)) {
+        return JSON.parse(fs.readFileSync(ACCOUNTS_LOCAL, 'utf-8'))
+    }
+    return {}
+}
+
+function saveAccountsLocal(accounts) {
+    fs.writeFileSync(ACCOUNTS_LOCAL, JSON.stringify(accounts, null, 2))
+}
+
+/**
+ * Load the deployable account registry (public/accounts.json).
+ */
+function loadRegistry() {
+    if (fs.existsSync(ACCOUNTS_REGISTRY)) {
+        return JSON.parse(fs.readFileSync(ACCOUNTS_REGISTRY, 'utf-8'))
+    }
+    return { accounts: [] }
+}
+
+function saveRegistry(registry) {
+    fs.mkdirSync(path.dirname(ACCOUNTS_REGISTRY), { recursive: true })
+    fs.writeFileSync(ACCOUNTS_REGISTRY, JSON.stringify(registry, null, 2))
+}
+
+/**
+ * Add a publishing account: generate a keypair, register it in the deployable
+ * registry, and print the two things the account owner must host on their
+ * domain: /.well-known/did.json content and the _atproto TXT record.
+ */
+async function accountAdd(handle) {
+    if (!handle || !handle.includes('.')) {
+        console.error('Usage: node cli/seal.js account add <handle>   # e.g. pub1.example.com')
+        process.exit(1)
+    }
+
+    const main = loadConfig()
+    const pdsUrl = main && main.handle ? `https://${main.handle}` : 'https://<your-worker>.workers.dev'
+    const did = `did:web:${handle}`
+    const id = handle.split('.')[0]
+
+    const accounts = loadAccountsLocal()
+    if (accounts[id]) {
+        console.error(`Account id "${id}" already exists in ${ACCOUNTS_LOCAL}`)
+        process.exit(1)
+    }
+
+    const { privateKey, publicKey } = await generateKeypair()
+    const publicKeyMultibase = publicKeyToMultibase(publicKey)
+
+    const didDoc = {
+        '@context': [
+            'https://www.w3.org/ns/did/v1',
+            'https://w3id.org/security/multikey/multikey-v1.jsonld',
+            'https://w3id.org/security/suites/secp256k1-2019/v1'
+        ],
+        id: did,
+        alsoKnownAs: [`at://${handle}`],
+        verificationMethod: [{
+            id: `${did}#atproto`,
+            type: 'Multikey',
+            controller: did,
+            publicKeyMultibase
+        }],
+        service: [{
+            id: '#atproto_pds',
+            type: 'AtprotoPersonalDataServer',
+            serviceEndpoint: pdsUrl
+        }]
+    }
+
+    // Deployable registry (public info) + local config (private key)
+    const registry = loadRegistry()
+    if (registry.accounts.some(a => a.did === did)) {
+        console.error(`Account ${did} already registered`)
+        process.exit(1)
+    }
+    registry.accounts.push({ id, handle, did, publicKeyMultibase })
+    saveRegistry(registry)
+
+    accounts[id] = { handle, did, privateKey, publicKey, publicKeyMultibase }
+    saveAccountsLocal(accounts)
+
+    console.log('✓ Publishing account created')
+    console.log(`  id: ${id}`)
+    console.log(`  DID: ${did}`)
+    console.log(`  Handle: ${handle}`)
+    console.log('')
+    console.log('请让账号持有者在其域名配置两样东西：')
+    console.log('')
+    console.log(`1) https://${handle}/.well-known/did.json 内容（粘贴保存）：`)
+    console.log(JSON.stringify(didDoc, null, 2))
+    console.log('')
+    console.log(`2) DNS TXT 记录：`)
+    console.log(`   _atproto.${handle}  TXT  "did=did:web:${handle}"`)
+    console.log('')
+    console.log(`3) 发布：node cli/seal.js post --account ${id} "内容" [--image x.jpg]`)
+    console.log('   然后 cp journal.ndjson public/journal.ndjson && 部署（public/accounts.json 已生成）')
+}
 
 /**
  * Load or create config
@@ -115,17 +221,38 @@ async function rotateKey() {
 /**
  * Create a post
  * @param {string} text
- * @param {{images?: Array<{path: string, alt?: string}>}} options
+ * @param {{images?: Array<{path: string, alt?: string}>, accountId?: string}} options
  */
 async function createPost(text, options = {}) {
-    const config = loadConfig()
-    if (!config) {
-        console.error('Not initialized. Run: node cli/sign.js init')
-        process.exit(1)
+    // Publishing account: load its config (did + private key). Otherwise the
+    // main account (config.json) is used.
+    let config = loadConfig()
+    let statePath = STATE_PATH
+    let uploadsDir = UPLOADS_DIR
+    let did
+    let privateKey
+    if (options.accountId) {
+        const accounts = loadAccountsLocal()
+        const acct = accounts[options.accountId]
+        if (!acct) {
+            console.error(`Account "${options.accountId}" not found. Run: node cli/seal.js account add <handle>`)
+            process.exit(1)
+        }
+        did = acct.did
+        privateKey = acct.privateKey
+        statePath = `./.repo-state-${options.accountId}.json`
+        uploadsDir = path.join(UPLOADS_DIR, options.accountId)
+    } else {
+        if (!config) {
+            console.error('Not initialized. Run: node cli/sign.js init')
+            process.exit(1)
+        }
+        did = config.did
+        privateKey = config.privateKey
     }
 
-    const repo = new RepoManager(config.did, config.privateKey, STATE_PATH)
-    const journal = new JournalWriter(JOURNAL_PATH)
+    const repo = new RepoManager(did, privateKey, statePath)
+    const journal = new JournalWriter(JOURNAL_PATH, did)
     const rkey = generateTID()
 
     const record = {
@@ -135,13 +262,13 @@ async function createPost(text, options = {}) {
     }
 
     // Optional images: build the embed record and stage blob files into
-    // public/uploads/ (deployed with the Worker as static assets).
+    // the account's uploads dir (deployed with the Worker as static assets).
     if (options.images && options.images.length > 0) {
         const { embed, uploads } = await buildImageEmbed(options.images)
         record.embed = embed
-        fs.mkdirSync(UPLOADS_DIR, { recursive: true })
+        fs.mkdirSync(uploadsDir, { recursive: true })
         for (const u of uploads) {
-            const file = path.join(UPLOADS_DIR, `${u.cid}.${u.ext}`)
+            const file = path.join(uploadsDir, `${u.cid}.${u.ext}`)
             fs.writeFileSync(file, u.bytes)
             console.log(`  Blob: ${u.cid}.${u.ext} (${u.bytes.length} bytes)`)
         }
@@ -165,7 +292,7 @@ async function createPost(text, options = {}) {
         collection: 'app.bsky.feed.post',
         rkey,
         record,
-        did: config.did,
+        did,
         rev: result.rev,
         recordCid: result.recordCid,
         commit: result.commit,
@@ -176,7 +303,7 @@ async function createPost(text, options = {}) {
     })
 
     console.log('✓ Post created')
-    console.log(`  URI: at://${config.did}/app.bsky.feed.post/${rkey}`)
+    console.log(`  URI: at://${did}/app.bsky.feed.post/${rkey}`)
     console.log(`  Record CID: ${result.recordCid}`)
     console.log(`  Commit CID: ${result.commitCid}`)
     console.log(`  MST root: ${result.mstRoot}`)
@@ -376,10 +503,18 @@ async function validate() {
         const chainResult = await journal.validate()
         let sigErrors = 0
 
-        // Commit signature + record CID verification (new format)
+        // Commit signature + record CID verification (new format).
+        // Each account's commits verify against ITS OWN public key.
+        const accounts = loadAccountsLocal()
+        const keyForDid = (did) => {
+            if (did === config.did) return config.publicKey
+            const acct = Object.values(accounts).find(a => a.did === did)
+            return acct ? acct.publicKey : null
+        }
         for (const event of events) {
             if (event.commitCid) {
-                const sigOk = await verifyCommitSig(event.commit, config.publicKey)
+                const pubKey = keyForDid(event.did)
+                const sigOk = pubKey ? await verifyCommitSig(event.commit, pubKey) : false
                 if (!sigOk) {
                     sigErrors++
                     console.error(`  ✗ Commit signature invalid at offset ${event.offset}`)
@@ -432,21 +567,24 @@ function listRecords() {
 }
 
 /**
- * Parse `post` arguments: positional text + repeatable --image/--alt.
+ * Parse `post` arguments: positional text + repeatable --image/--alt + --account.
  */
 function parsePostArgs(args) {
     let text = 'Hello from atproto-worker!'
+    let accountId = null
     const images = []
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '--image' && args[i + 1]) {
             images.push({ path: args[++i] })
         } else if (args[i] === '--alt' && args[i + 1]) {
             images[images.length - 1] && (images[images.length - 1].alt = args[++i])
+        } else if (args[i] === '--account' && args[i + 1]) {
+            accountId = args[++i]
         } else {
             text = args[i]
         }
     }
-    return { text, images }
+    return { text, images, accountId }
 }
 
 // Main CLI
@@ -459,9 +597,13 @@ switch (command) {
     case 'rotate-key':
         rotateKey()
         break
+    case 'account':
+        if (process.argv[3] === 'add') accountAdd(process.argv[4])
+        else console.error('Usage: node cli/seal.js account add <handle>')
+        break
     case 'post': {
-        const { text, images } = parsePostArgs(process.argv.slice(3))
-        createPost(text, { images })
+        const { text, images, accountId } = parsePostArgs(process.argv.slice(3))
+        createPost(text, { images, accountId })
         break
     }
     case 'like':
@@ -486,7 +628,8 @@ ATProto Signing CLI
 Usage:
   node cli/seal.js init [did] [handle]   Initialize with keypair
   node cli/seal.js rotate-key            Generate a new keypair
-  node cli/seal.js post "text" [--image path.jpg] [--alt "描述"]   Create a post (up to 4 images)
+  node cli/seal.js account add <handle>  注册发布账号（输出 did.json + TXT 粘贴内容）
+  node cli/seal.js post "text" [--image path.jpg] [--alt "描述"] [--account <id>]  发帖（最多 4 图；--account 用发布账号）
   node cli/seal.js like <at-uri> <cid>   Like a post (requires subject CID)
   node cli/seal.js repost <at-uri> <cid> Repost (requires subject CID)
   node cli/seal.js follow did:...        Follow someone

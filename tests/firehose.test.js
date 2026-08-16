@@ -125,9 +125,11 @@ async function buildJournal() {
         prevMstRoot: null, blocksB64: 'dHdv'
     })
 
-    const c3 = mkCommit('3aa3', commitCid2)
+    const c3 = mkCommit('3aa3', null) // independent chain for the foreign account
     const commitCid3 = await commitCid(c3)
-    const e3 = await writer.append({
+    // per-did writer so the foreign account's event.prev starts its own chain
+    const foreignWriter = new JournalWriter(TEST_JOURNAL, 'did:web:foreign')
+    const e3 = await foreignWriter.append({
         op: 'create', collection: 'app.bsky.feed.post', rkey: '3p3',
         record: { text: 'three' }, did: 'did:web:foreign', rev: '3aa3',
         recordCid: 'bafyreir3', commit: c3, commitCid: commitCid3,
@@ -227,24 +229,25 @@ test('firehose - backfill with null cursor delivers full history', async () => {
     const firehose = makeFirehose({ JOURNAL_CONTENT: content, OWNER_DID: DID })
     await firehose.backfill(ws, -1)
 
-    assert.strictEqual(ws.sent.length, 2)
+    // All journal events pass through (the journal only ever contains
+    // CLI-authored, hosted-account events; multi-account PDS emits them all).
+    assert.strictEqual(ws.sent.length, 3)
     const seqs = ws.sent.map(m => decodeFrame(m).body.seq)
-    assert.deepStrictEqual(seqs, [e1.offset, e2.offset])
-    // Cursor advances past the last journal offset (even foreign-did events)
+    assert.deepStrictEqual(seqs, [e1.offset, e2.offset, e3.offset])
+    // Cursor advances past the last journal offset
     assert.deepStrictEqual(ws.attachment, { cursor: e3.offset })
 })
 
 test('firehose - backfill with cursor N delivers only later events', async () => {
-    const { content, e1, e2 } = await buildJournal()
+    const { content, e1, e2, e3 } = await buildJournal()
     const ws = fakeWs()
     const firehose = makeFirehose({ JOURNAL_CONTENT: content, OWNER_DID: DID })
     await firehose.backfill(ws, e1.offset)
 
-    assert.strictEqual(ws.sent.length, 1)
-    const { header, body } = decodeFrame(ws.sent[0])
-    assert.deepStrictEqual(header, { op: 1, t: '#commit' })
-    assert.strictEqual(body.seq, e2.offset)
-    assert.strictEqual(body.commit.$link, e2.commitCid)
+    assert.strictEqual(ws.sent.length, 2)
+    const bodies = ws.sent.map(m => decodeFrame(m).body)
+    assert.deepStrictEqual(bodies.map(b => b.seq), [e2.offset, e3.offset])
+    assert.strictEqual(bodies[0].commit.$link, e2.commitCid)
 })
 
 test('firehose - broadcast filters foreign events and formats frames', async () => {

@@ -21,18 +21,28 @@ function xrpcSuccess(data, status = 200) {
 }
 
 /**
- * Handle XRPC requests (journal-based, read-only)
+ * Events of one hosted account (journal holds all accounts in one file).
  */
-export async function handleXrpc(request, { journal, did, handle, env }) {
+function eventsForDid(journal, did) {
+    return journal.events.filter(e => e.did === did)
+}
+
+/**
+ * Handle XRPC requests (journal-based, read-only)
+ * `hosted` is the set of DIDs this PDS serves (main did:web + publishing
+ * accounts); falls back to the single main did when not provided.
+ */
+export async function handleXrpc(request, { journal, did, handle, env, hosted }) {
     const url = new URL(request.url)
     const method = url.pathname.replace('/xrpc/', '')
+    const hostedSet = hosted || new Set([did])
 
     switch (method) {
         case 'com.atproto.repo.getRecord':
-            return handleGetRecord(url, journal, did)
+            return handleGetRecord(url, journal, hostedSet)
 
         case 'com.atproto.repo.listRecords':
-            return handleListRecords(url, journal, did)
+            return handleListRecords(url, journal, hostedSet)
 
         case 'com.atproto.identity.resolveHandle':
             return handleResolveHandle(url, handle, did)
@@ -44,22 +54,22 @@ export async function handleXrpc(request, { journal, did, handle, env }) {
             return handleSubscribeRepos(request, env, journal)
 
         case 'com.atproto.sync.listRepos':
-            return handleListRepos(did, journal)
+            return handleListRepos(did, journal, hostedSet)
 
         case 'com.atproto.sync.getLatestCommit':
-            return handleGetLatestCommit(url, journal, did)
+            return handleGetLatestCommit(url, journal, hostedSet)
 
         case 'com.atproto.sync.getRepoStatus':
-            return handleGetRepoStatus(url, journal, did)
+            return handleGetRepoStatus(url, journal, hostedSet)
 
         case 'com.atproto.sync.getRepo':
-            return handleGetRepo(url, journal, did)
+            return handleGetRepo(url, journal, hostedSet)
 
         case 'com.atproto.sync.getBlob':
-            return handleGetBlob(url, journal, did, env)
+            return handleGetBlob(url, journal, hostedSet, env)
 
         case 'com.atproto.repo.describeRepo':
-            return handleDescribeRepo(url, journal, handle, did, env)
+            return handleDescribeRepo(url, journal, handle, did, env, hostedSet)
 
         case '_health':
             return handleHealth(journal)
@@ -90,7 +100,7 @@ function handleHealth(journal) {
 /**
  * com.atproto.repo.getRecord - read from journal
  */
-function handleGetRecord(url, journal, ownerDid) {
+function handleGetRecord(url, journal, hosted) {
     const repoDid = url.searchParams.get('repo')
     const collection = url.searchParams.get('collection')
     const rkey = url.searchParams.get('rkey')
@@ -99,17 +109,17 @@ function handleGetRecord(url, journal, ownerDid) {
         return xrpcError(400, 'InvalidRequest', 'repo, collection, and rkey are required')
     }
 
-    if (repoDid !== ownerDid) {
-        return xrpcError(400, 'InvalidRequest', 'Can only get records from this PDS')
+    if (!hosted.has(repoDid)) {
+        return xrpcError(400, 'InvalidRequest', 'Can only get records from hosted accounts')
     }
 
-    const event = journal.getRecord(collection, rkey)
+    const event = journal.getRecord(repoDid, collection, rkey)
     if (!event) {
         return xrpcError(404, 'RecordNotFound', 'Record not found')
     }
 
     return xrpcSuccess({
-        uri: `at://${ownerDid}/${collection}/${rkey}`,
+        uri: `at://${repoDid}/${collection}/${rkey}`,
         cid: event.recordCid || event.commitCid || event.cid,
         value: event.record
     })
@@ -118,7 +128,7 @@ function handleGetRecord(url, journal, ownerDid) {
 /**
  * com.atproto.repo.listRecords - list from journal
  */
-function handleListRecords(url, journal, ownerDid) {
+function handleListRecords(url, journal, hosted) {
     const repoDid = url.searchParams.get('repo')
     const collection = url.searchParams.get('collection')
     const limit = Math.min(parseInt(url.searchParams.get('limit')) || 50, 100)
@@ -128,15 +138,15 @@ function handleListRecords(url, journal, ownerDid) {
         return xrpcError(400, 'InvalidRequest', 'repo and collection are required')
     }
 
-    if (repoDid !== ownerDid) {
-        return xrpcError(400, 'InvalidRequest', 'Can only list records from this PDS')
+    if (!hosted.has(repoDid)) {
+        return xrpcError(400, 'InvalidRequest', 'Can only list records from hosted accounts')
     }
 
-    const result = journal.listRecords(collection, { limit, cursor })
+    const result = journal.listRecords(repoDid, collection, { limit, cursor })
 
     return xrpcSuccess({
         records: result.records.map(e => ({
-            uri: `at://${ownerDid}/${collection}/${e.rkey}`,
+            uri: `at://${repoDid}/${collection}/${e.rkey}`,
             cid: e.recordCid || e.commitCid || e.cid,
             value: e.record
         })),
@@ -212,33 +222,36 @@ async function handleSubscribeRepos(request, env, journal) {
 /**
  * com.atproto.sync.listRepos
  */
-function handleListRepos(did, journal) {
-    const latest = journal.events.length > 0 ? journal.events[journal.events.length - 1] : null
-
-    return xrpcSuccess({
-        repos: [{
+function handleListRepos(mainDid, journal, hosted) {
+    const repos = []
+    for (const did of hosted) {
+        const events = eventsForDid(journal, did)
+        const latest = events.length > 0 ? events[events.length - 1] : null
+        repos.push({
             did,
             head: latest ? (latest.commitCid || latest.cid) : null,
             rev: latest ? latest.rev : null
-        }]
-    })
+        })
+    }
+    return xrpcSuccess({ repos })
 }
 
 /**
  * com.atproto.sync.getLatestCommit
  */
-function handleGetLatestCommit(url, journal, ownerDid) {
+function handleGetLatestCommit(url, journal, hosted) {
     const repoDid = url.searchParams.get('did')
 
-    if (repoDid !== ownerDid) {
-        return xrpcError(400, 'InvalidRequest', 'Can only get commits from this PDS')
+    if (!hosted.has(repoDid)) {
+        return xrpcError(400, 'InvalidRequest', 'Can only get commits from hosted accounts')
     }
 
-    if (journal.events.length === 0) {
+    const events = eventsForDid(journal, repoDid)
+    if (events.length === 0) {
         return xrpcError(404, 'RepoNotFound', 'No commits found')
     }
 
-    const latest = journal.events[journal.events.length - 1]
+    const latest = events[events.length - 1]
 
     return xrpcSuccess({
         cid: latest.commitCid || latest.cid,
@@ -250,14 +263,15 @@ function handleGetLatestCommit(url, journal, ownerDid) {
  * com.atproto.sync.getRepoStatus
  * Hosting status for a repository on this server.
  */
-function handleGetRepoStatus(url, journal, ownerDid) {
+function handleGetRepoStatus(url, journal, hosted) {
     const repoDid = url.searchParams.get('did')
 
-    if (repoDid !== ownerDid) {
-        return xrpcError(400, 'InvalidRequest', 'Can only get status of repos on this PDS')
+    if (!hosted.has(repoDid)) {
+        return xrpcError(400, 'InvalidRequest', 'Can only get status of hosted repos')
     }
 
-    const latest = journal.events.length > 0 ? journal.events[journal.events.length - 1] : null
+    const events = eventsForDid(journal, repoDid)
+    const latest = events.length > 0 ? events[events.length - 1] : null
 
     return xrpcSuccess({
         did: repoDid,
@@ -272,22 +286,23 @@ function handleGetRepoStatus(url, journal, ownerDid) {
  * New format: rebuilds full CAR from all per-commit blocks in the journal.
  * Legacy fallback: empty CAR (see ADR-006).
  */
-function handleGetRepo(url, journal, ownerDid) {
+function handleGetRepo(url, journal, hosted) {
     const repoDid = url.searchParams.get('did')
 
-    if (repoDid !== ownerDid) {
-        return xrpcError(400, 'InvalidRequest', 'Can only get repos on this PDS')
+    if (!hosted.has(repoDid)) {
+        return xrpcError(400, 'InvalidRequest', 'Can only get repos from hosted accounts')
     }
 
-    if (journal.events.length === 0) {
+    const events = eventsForDid(journal, repoDid)
+    if (events.length === 0) {
         return xrpcError(404, 'RepoNotFound', 'No commits found')
     }
 
-    const latest = journal.events[journal.events.length - 1]
+    const latest = events[events.length - 1]
 
     // New format: rebuild full CAR from per-commit CAR blocks
     if (latest.commitCid && latest.blocksB64) {
-        const car = rebuildRepoCar(journal.events, latest.commitCid)
+        const car = rebuildRepoCar(events, latest.commitCid)
         if (car) {
             return new Response(car, {
                 status: 200,
@@ -450,19 +465,24 @@ const BLOB_CANDIDATES = [
     ['avif', 'image/avif'],
 ]
 
-async function handleGetBlob(url, journal, ownerDid, env) {
+async function handleGetBlob(url, journal, hosted, env) {
     const did = url.searchParams.get('did')
     const cid = url.searchParams.get('cid')
 
-    if (did !== ownerDid || !isValidCidString(cid)) {
+    if (!hosted.has(did) || !isValidCidString(cid)) {
         return xrpcError(404, 'BlobNotFound', 'Blob not found')
     }
     if (!env.ASSETS) {
         return xrpcError(404, 'BlobNotFound', 'Blob not found')
     }
 
+    // Publishing accounts use uploads/<accountId>/; the main did:web account
+    // keeps blobs at the uploads/ root (backward compatible).
+    const account = journal.accountForDid(did)
+    const prefix = account ? `uploads/${account.id}/` : 'uploads/'
+
     for (const [ext, mime] of BLOB_CANDIDATES) {
-        const resp = await env.ASSETS.fetch(`https://worker/uploads/${cid}.${ext}`)
+        const resp = await env.ASSETS.fetch(`https://worker/${prefix}${cid}.${ext}`)
         if (resp.ok) {
             return new Response(resp.body, {
                 status: 200,
@@ -479,37 +499,46 @@ async function handleGetBlob(url, journal, ownerDid, env) {
 
 /**
  * com.atproto.repo.describeRepo
- * Get information about the account and repository.
+ * Get information about an account and its repository.
  */
-function handleDescribeRepo(url, journal, ownerHandle, ownerDid, env) {
+function handleDescribeRepo(url, journal, mainHandle, mainDid, env, hosted) {
     const repo = url.searchParams.get('repo')
 
     if (!repo) {
         return xrpcError(400, 'InvalidRequest', 'repo is required')
     }
 
-    // Resolve handle or DID to our DID
-    if (repo.startsWith('did:')) {
-        if (repo !== ownerDid) {
-            return xrpcError(400, 'InvalidRequest', 'Can only describe repos on this PDS')
-        }
-    } else if (repo !== ownerHandle) {
-        return xrpcError(400, 'InvalidRequest', 'Can only describe repos on this PDS')
+    // Resolve repo (did or handle) to a hosted account (main or registry)
+    let did = repo.startsWith('did:') ? repo : null
+    if (!did) {
+        const byHandle = journal.accounts.find(a => a.handle === repo)
+        if (byHandle) did = byHandle.did
+        else if (repo === mainHandle) did = mainDid
+    }
+    if (!did || !hosted.has(did)) {
+        return xrpcError(400, 'InvalidRequest', 'Can only describe hosted repos')
     }
 
-    const didDoc = generateDidWebDocument(
-        env.OWNER_HANDLE || url.hostname,
-        ownerHandle,
-        env.OWNER_PUBLIC_KEY,
-        ownerDid
-    )
+    let handle, pubkey
+    const account = journal.accountForDid(did)
+    if (account) {
+        handle = account.handle
+        pubkey = account.publicKeyMultibase
+    } else {
+        handle = mainHandle
+        pubkey = env.OWNER_PUBLIC_KEY
+    }
 
-    // Collect distinct collections from journal
+    const didDoc = generateDidWebDocument(handle, handle, pubkey, did)
+
+    // Collections belonging to this account (index keys are did-prefixed)
     const collections = [...journal.byCollection.keys()]
+        .filter(k => k.startsWith(`${did}/`))
+        .map(k => k.slice(did.length + 1))
 
     return xrpcSuccess({
-        handle: ownerHandle,
-        did: ownerDid,
+        handle,
+        did,
         didDoc,
         collections,
         handleIsCorrect: true

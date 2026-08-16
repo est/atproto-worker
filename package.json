@@ -10,7 +10,7 @@
     "seal": "node cli/seal.js",
     "seal:init": "node cli/seal.js init",
     "seal:post": "node cli/seal.js post",
-    "test": "node tests/crypto.test.js && node tests/journal.test.js && node tests/interop.test.js && node tests/mst.test.js && node tests/mst-atcute.test.js && node tests/firehose.test.js && node tests/blob.test.js && node tests/e2e.test.js"
+    "test": "node tests/crypto.test.js && node tests/journal.test.js && node tests/interop.test.js && node tests/mst.test.js && node tests/mst-atcute.test.js && node tests/firehose.test.js && node tests/blob.test.js && node tests/multi-account.test.js && node tests/e2e.test.js"
   },
   "devDependencies": {
     "@atcute/mst": "^1.0.3",

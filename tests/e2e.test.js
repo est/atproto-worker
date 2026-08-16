@@ -118,7 +118,7 @@ test('e2e - worker Journal loads, validates, indexes, serves records', async () 
     assert.strictEqual(journal.loaded, true)
 
     // getRecord returns the latest event for a path
-    const rec = journal.getRecord('app.bsky.feed.post', '3p2')
+    const rec = journal.getRecord(DID, 'app.bsky.feed.post', '3p2')
     assert.ok(rec)
     assert.strictEqual(rec.record.text, 'second post')
 
@@ -147,7 +147,7 @@ test('e2e - refresh from fake ASSETS loads journal', async () => {
     assert.strictEqual(result.eventCount, 2)
     assert.strictEqual(journal.events.length, 2)
 
-    const rec = journal.getRecord('app.bsky.feed.post', '3p1')
+    const rec = journal.getRecord(DID, 'app.bsky.feed.post', '3p1')
     assert.ok(rec)
     assert.strictEqual(rec.record.text, 'hello atproto')
 })

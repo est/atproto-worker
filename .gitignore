@@ -36,3 +36,5 @@ indigo
 .mimocode
 *.sublime-*
 .repo-state.json
+.repo-state-*.json
+config.accounts.json

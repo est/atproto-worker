@@ -12,23 +12,28 @@ const DEFAULT_JOURNAL_PATH = './journal.ndjson'
 
 /**
  * Journal writer for appending events
+ * Multi-account aware: when `did` is given, the prev chain is looked up
+ * per account (the journal holds events from all hosted accounts in one
+ * file); when null, the last line is used (single-account legacy).
  */
 export class JournalWriter {
-    constructor(journalPath = DEFAULT_JOURNAL_PATH) {
+    constructor(journalPath = DEFAULT_JOURNAL_PATH, did = null) {
         this.journalPath = journalPath
+        this.did = did
         this.prevCid = null
         this.prevRev = null
 
-        // Load existing journal to get prev CID and rev
+        // Load existing journal to get prev CID and rev for this account
         if (fs.existsSync(journalPath)) {
             const content = fs.readFileSync(journalPath, 'utf-8').trim()
             if (content) {
                 const lines = content.split('\n')
-                const lastLine = lines[lines.length - 1]
-                if (lastLine) {
-                    const lastEvent = JSON.parse(lastLine)
-                    this.prevCid = lastEvent.commitCid || lastEvent.cid
-                    this.prevRev = lastEvent.rev
+                for (let i = lines.length - 1; i >= 0; i--) {
+                    const lastEvent = JSON.parse(lines[i])
+                    if (this.did && lastEvent.did !== this.did) continue
+                    this.prevCid = lastEvent.commitCid || lastEvent.cid || null
+                    this.prevRev = lastEvent.rev || null
+                    break
                 }
             }
         }
@@ -104,17 +109,22 @@ export class JournalWriter {
 
     /**
      * Validate journal integrity
+     * The journal holds all accounts' events in one file, so chains are
+     * validated PER DID.
      * New format: verify commit v3 signature + commitCid chain + record CIDs
      * Legacy format: verify event CID chain
      */
     async validate() {
         const events = this.readAll()
-        let prevCid = null
-        let prevCommitCid = null
+        const prevCidByDid = new Map()
+        const prevCommitCidByDid = new Map()
         const { verifyCommitSig } = await import('./atproto.js')
 
         for (const event of events) {
-            // Check prev chain
+            const did = event.did || ''
+            const prevCid = prevCidByDid.get(did) || null
+
+            // Check prev chain (per did)
             if (event.prev !== prevCid) {
                 throw new Error(`Chain broken at offset ${event.offset}: expected prev=${prevCid}, got ${event.prev}`)
             }
@@ -131,10 +141,11 @@ export class JournalWriter {
                     throw new Error(`Commit CID mismatch at offset ${event.offset}: expected ${expectedCommitCid}, got ${event.commitCid}`)
                 }
                 // Verify signature (needs public key - done in seal validate with config)
+                const prevCommitCid = prevCommitCidByDid.get(did) || null
                 if (event.commit.prev !== prevCommitCid) {
                     throw new Error(`Commit chain broken at offset ${event.offset}: expected prev=${prevCommitCid}, got ${event.commit.prev}`)
                 }
-                prevCommitCid = event.commitCid
+                prevCommitCidByDid.set(did, event.commitCid)
             } else {
                 // Legacy format: event CID chain
                 const expectedCid = await computeCID({
@@ -150,7 +161,7 @@ export class JournalWriter {
                 }
             }
 
-            prevCid = event.commitCid || event.cid || null
+            prevCidByDid.set(did, event.commitCid || event.cid || null)
         }
 
         return { valid: true, eventCount: events.length }

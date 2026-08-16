@@ -207,22 +207,16 @@ export class Firehose {
             const journal = new Journal(this.env)
             await journal.load()
 
-            // Owner DID derives from the journal when env vars are unset
-            // (the DO has no request host; the journal only ever contains
-            // the owner's events).
-            const ownerDid = this.env.OWNER_DID || (journal.events[0] && journal.events[0].did)
-
             // Page through the whole journal past the cursor — a fresh
-            // subscriber must get every event or it indexes a partial repo.
+            // subscriber must get every event of every hosted account or it
+            // indexes a partial repo. The journal only ever contains hosted
+            // accounts' events (CLI-authored), so no did filter is needed.
             let lastOffset = cursor
             while (true) {
                 const batch = journal.getEventsFromCursor(lastOffset, 1000)
                 if (batch.length === 0) break
 
-                // Filter by OWNER_DID (fail-open: unknown owner passes all)
-                const events = ownerDid ? batch.filter(e => e.did === ownerDid) : batch
-
-                for (const event of events) {
+                for (const event of batch) {
                     const message = this.formatEvent(event)
 
                     try {
