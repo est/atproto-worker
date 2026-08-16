@@ -17,6 +17,7 @@
  */
 
 import fs from 'node:fs'
+import { ProxyAgent } from 'undici'
 import { JournalWriter } from './journal.js'
 
 const WORKER = process.env.WORKER_URL || 'https://atproto-worker.yiesty.workers.dev'
@@ -25,11 +26,16 @@ const HANDLE = process.env.OWNER_HANDLE || 'atproto-worker.yiesty.workers.dev'
 
 const FETCH_TIMEOUT_MS = 15000
 
+// node fetch ignores https_proxy; route through undici's ProxyAgent so this
+// script works in proxied environments (e.g. behind an HTTPS proxy).
+const proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY
+const dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : undefined
+
 async function fetchWithTimeout(url) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
     try {
-        return await fetch(url, { signal: controller.signal })
+        return await fetch(url, { signal: controller.signal, dispatcher })
     } finally {
         clearTimeout(timer)
     }
