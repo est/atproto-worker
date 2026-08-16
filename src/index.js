@@ -64,44 +64,13 @@ export default {
 
             // Refresh endpoint - sync journal from HTTP source
             if (path === '/refresh') {
-                const lastCidBefore = journal.events.length > 0
-                    ? journal.events[journal.events.length - 1].cid
-                    : null
-
-                const result = await journal.refresh()
-
-                // Find new events by matching last known CID
-                // This protects against non-append-only journals
-                let newEvents
-                if (lastCidBefore) {
-                    const lastIdx = journal.events.findIndex(e => e.cid === lastCidBefore)
-                    if (lastIdx === -1) {
-                        // Journal was completely rewritten - treat all as new
-                        // This shouldn't happen in append-only mode
-                        console.warn('Journal was rewritten (last CID not found), broadcasting all events')
-                        newEvents = journal.events
-                    } else {
-                        newEvents = journal.events.slice(lastIdx + 1)
-                    }
-                } else {
-                    newEvents = journal.events
-                }
-
-                // Broadcast new events to firehose
-                if (newEvents.length > 0) {
-                    const id = env.FIREHOSE.idFromName('main')
-                    const stub = env.FIREHOSE.get(id)
-                    ctx.waitUntil(stub.fetch('http://localhost/broadcast', {
-                        method: 'POST',
-                        body: JSON.stringify({ events: newEvents }),
-                        headers: { 'Content-Type': 'application/json' }
-                    }))
-                }
+                await journal.refresh()
+                const newEvents = await broadcastNewEvents(journal, env, ctx)
 
                 response = new Response(JSON.stringify({
                     ok: true,
                     message: `Journal refreshed, ${newEvents.length} new events broadcasted`,
-                    ...result
+                    eventCount: journal.events.length
                 }), {
                     headers: { 'Content-Type': 'application/json' }
                 })
@@ -188,35 +157,8 @@ export default {
         // Optionally refresh journal on cron
         if (env.JOURNAL_URL) {
             try {
-                const lastCidBefore = journal.events.length > 0
-                    ? journal.events[journal.events.length - 1].cid
-                    : null
-
                 await journal.refresh()
-
-                // Find new events by matching last known CID
-                let newEvents
-                if (lastCidBefore) {
-                    const lastIdx = journal.events.findIndex(e => e.cid === lastCidBefore)
-                    if (lastIdx === -1) {
-                        console.warn('Journal was rewritten (last CID not found), broadcasting all events')
-                        newEvents = journal.events
-                    } else {
-                        newEvents = journal.events.slice(lastIdx + 1)
-                    }
-                } else {
-                    newEvents = journal.events
-                }
-
-                if (newEvents.length > 0) {
-                    const id = env.FIREHOSE.idFromName('main')
-                    const stub = env.FIREHOSE.get(id)
-                    ctx.waitUntil(stub.fetch('http://localhost/broadcast', {
-                        method: 'POST',
-                        body: JSON.stringify({ events: newEvents }),
-                        headers: { 'Content-Type': 'application/json' }
-                    }))
-                }
+                await broadcastNewEvents(journal, env, ctx)
             } catch (e) {
                 console.error('Journal refresh failed:', e)
             }
@@ -236,6 +178,32 @@ export default {
 
 const RELAY_CRAWL_URL = 'https://bsky.network/xrpc/com.atproto.sync.requestCrawl'
 const RELAY_NOTIFY_THROTTLE_MS = 20 * 60 * 1000 // 20 min
+const FIREHOSE_CURSOR_KEY = 'firehose-cursor'
+
+/**
+ * Broadcast journal events past the last-broadcast offset to connected
+ * firehose subscribers. The cursor is persisted in KV so it survives across
+ * requests — the journal is a static asset, so a CID-diff between load() and
+ * refresh() (both reading the same ASSETS) would never detect new events.
+ * @returns {Promise<Array>} the events that were broadcast
+ */
+async function broadcastNewEvents(journal, env, ctx) {
+    if (!env.FIREHOSE || !env.JOURNAL_KV) return []
+
+    const lastOffset = parseInt(await env.JOURNAL_KV.get(FIREHOSE_CURSOR_KEY)) || -1
+    const newEvents = journal.getEventsFromCursor(lastOffset)
+    if (newEvents.length === 0) return []
+
+    const id = env.FIREHOSE.idFromName('main')
+    const stub = env.FIREHOSE.get(id)
+    ctx.waitUntil(stub.fetch('http://localhost/broadcast', {
+        method: 'POST',
+        body: JSON.stringify({ events: newEvents }),
+        headers: { 'Content-Type': 'application/json' }
+    }))
+    await env.JOURNAL_KV.put(FIREHOSE_CURSOR_KEY, String(newEvents[newEvents.length - 1].offset))
+    return newEvents
+}
 
 /**
  * POST com.atproto.sync.requestCrawl to the relay so it crawls our repo.
