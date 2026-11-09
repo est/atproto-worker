@@ -5,15 +5,29 @@
  * - CAR assembly for commit events (root = commit CID)
  * - image embed construction (app.bsky.embed.images, blob refs)
  *
- * Signing follows the reference implementation exactly:
- *   sig = k256_lowS( sha256( CBOR({did, version:3, data, rev, prev}) ) )
- *   output is 64-byte compact raw bytes (hex here for JSON storage)
+ * The shared commit/CAR implementation lives in src/commit.js; this module
+ * keeps the historical CLI export names and adds multi-curve key dispatch:
+ *   - legacy k256 hex string -> @noble/secp256k1 (cli/crypto.sign)
+ *   - {curve:'p256'}       -> WebCrypto P-256 (cli/crypto.signP256)
+ *   - {curve:'k256'}       -> @noble/secp256k1
  */
 
 import fs from 'node:fs'
 import { imageSize } from 'image-size'
-import { computeCID, computeBlobCid, commitToCbor, commitCid as canonicalCommitCid, createCarFile } from '../src/shared.js'
-import { sign, verify } from './crypto.js'
+import { computeBlobCid, bytesToHex } from '../src/shared.js'
+import {
+  buildUnsignedCommit,
+  recordCid,
+  commitCid,
+  createCar,
+  carToBase64,
+  signCommit as signCommitShared,
+  verifyCommitSig as verifyCommitSigShared
+} from '../src/commit.js'
+import { parseMultikey } from '../src/keys.js'
+import { sign, verify, signP256, verifyP256 } from './crypto.js'
+
+export { buildUnsignedCommit, recordCid, commitCid, createCar, carToBase64 }
 
 const IMAGE_MIME = {
     jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
@@ -53,71 +67,70 @@ export async function buildImageEmbed(images) {
 }
 
 /**
- * Build the unsigned commit object.
- * @param {string} did - owner DID
- * @param {string} dataCid - MST root CID
- * @param {string} rev - TID revision
- * @param {string|null} prevCid - previous commit CID or null
- */
-export function buildUnsignedCommit(did, dataCid, rev, prevCid) {
-  return {
-    did,
-    version: 3,
-    data: dataCid,
-    rev,
-    prev: prevCid
-  }
-}
-
-/**
- * Sign an unsigned commit with the owner private key.
+ * Sign an unsigned commit with the owner key.
+ * @param {object} unsignedCommit
+ * @param {string|{curve?: string, privateKey: string}} key - legacy k256 hex
+ *   string, or a normalized key object ({curve, privateKey})
  * Returns the full commit v3 object (with sig as hex string).
- * The signature is computed over the canonical commit CBOR (data/prev as
- * CID links, cbor-gen field order), matching the reference implementation
- * so the relay's VerifySignature accepts it.
  */
-export async function signCommit(unsignedCommit, privateKeyHex) {
-  const encoded = commitToCbor(unsignedCommit)
-  const sig = await sign(encoded, privateKeyHex)
-  return { ...unsignedCommit, sig }
+export async function signCommit(unsignedCommit, key) {
+  if (typeof key === 'string') {
+    return signCommitShared(unsignedCommit, (encoded) => sign(encoded, key))
+  }
+  if (!key || !key.privateKey) throw new Error('signCommit requires a private key')
+
+  const curve = key.curve || 'k256'
+  if (curve === 'p256') {
+    return signCommitShared(unsignedCommit, (encoded) => signP256(key.privateKey, encoded))
+  }
+  if (curve === 'k256') {
+    return signCommitShared(unsignedCommit, (encoded) => sign(encoded, key.privateKey))
+  }
+  throw new Error(`Unsupported curve: ${curve}`)
 }
 
 /**
- * Verify a commit v3 signature against a hex public key.
+ * Verify a commit v3 signature.
+ * @param {object} commit
+ * @param {string|{curve?: string, publicKey?: string, publicKeyMultibase?: string}} key
+ *   legacy k256 hex string, or a key object with a public key
  */
-export async function verifyCommitSig(commit, publicKeyHex) {
-  const { sig, ...rest } = commit
-  const encoded = commitToCbor(rest)
-  return verify(encoded, sig, publicKeyHex)
+export async function verifyCommitSig(commit, key) {
+  if (typeof key === 'string') {
+    return verifyCommitSigShared(commit, (encoded, sig) => verify(encoded, sig, key))
+  }
+  if (!key) return false
+
+  const curve = key.curve || 'k256'
+  if (curve === 'p256') {
+    const publicKey = key.publicKeyMultibase || key.publicKey
+    if (!publicKey) return false
+    return verifyCommitSigShared(commit, (encoded, sig) => verifyP256(publicKey, encoded, sig))
+  }
+  if (curve === 'k256') {
+    if (!key.publicKey) return false
+    return verifyCommitSigShared(commit, (encoded, sig) => verify(encoded, sig, key.publicKey))
+  }
+  return false
 }
 
 /**
- * Compute the CID of a record (dag-cbor, sha256) - the atproto record CID.
+ * Verify a commit against a Multikey string (z...), dispatching by curve:
+ * k256 via the CLI's secp256k1 verifier, p256 via src/keys.verifyP256.
  */
-export async function recordCid(record) {
-  return computeCID(record)
-}
+export async function verifyCommitSigWithMultikey(commit, multibase) {
+  let parsed
+  try {
+    parsed = parseMultikey(multibase)
+  } catch {
+    return false
+  }
 
-/**
- * Compute the CID of the commit object itself (canonical encoding).
- */
-export async function commitCid(commit) {
-  return canonicalCommitCid(commit)
-}
-
-/**
- * Assemble a CAR v1 file with the commit as root.
- * Single implementation lives in src/shared.js (createCarFile); re-exported
- * here under the historical name `createCar`.
- * @param {string} rootCid - commit CID (also root of the CAR)
- * @param {Array<{cid: string, data: any}>} blocks - extra blocks (MST nodes, records)
- * @returns {Uint8Array}
- */
-export { createCarFile as createCar }
-
-/**
- * Encode a CAR file to base64 string for storage in JSON journal lines.
- */
-export function carToBase64(carBytes) {
-  return Buffer.from(carBytes).toString('base64')
+  if (parsed.curve === 'p256') {
+    return verifyCommitSig(commit, { curve: 'p256', publicKeyMultibase: multibase })
+  }
+  return verifyCommitSig(commit, {
+    curve: 'k256',
+    publicKey: bytesToHex(parsed.compressed)
+  })
 }

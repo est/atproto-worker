@@ -23,7 +23,9 @@ enabled = true
 directory = "./public"
 binding = "ASSETS"
 
-# Durable Object for WebSocket subscriptions
+# Durable Object for WebSocket subscriptions + the SQLite append-only ledger
+# (events/heads/meta, schema_version=2). Reusing the existing binding/class
+# means no new DO migration is required.
 [[durable_objects.bindings]]
 name = "FIREHOSE"
 class_name = "Firehose"

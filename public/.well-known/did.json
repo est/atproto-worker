@@ -1,8 +1,7 @@
 {
   "@context": [
     "https://www.w3.org/ns/did/v1",
-    "https://w3id.org/security/multikey/multikey-v1.jsonld",
-    "https://w3id.org/security/suites/secp256k1-2019/v1"
+    "https://w3id.org/security/multikey/multikey-v1.jsonld"
   ],
   "id": "did:web:atproto-worker.yiesty.workers.dev",
   "alsoKnownAs": [
@@ -13,7 +12,7 @@
       "id": "did:web:atproto-worker.yiesty.workers.dev#atproto",
       "type": "Multikey",
       "controller": "did:web:atproto-worker.yiesty.workers.dev",
-      "publicKeyMultibase": "zQ3shZXSYEFob9hKne1G3igx7zS9b3s4H48nghqzKer2U3p34"
+      "publicKeyMultibase": "zDnaenYa7iu31rQQ9spPZwNEmcz1DHvwoWaWNq6Dht9HTYZ6z"
     }
   ],
   "service": [

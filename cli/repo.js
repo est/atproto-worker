@@ -15,19 +15,20 @@
 import fs from 'node:fs'
 import { MST } from './mst.js'
 import { recordCid, buildUnsignedCommit, signCommit, commitCid, createCar, carToBase64 } from './atproto.js'
-import { generateTID } from '../src/shared.js'
+import { nextTID } from '../src/shared.js'
 
 const DEFAULT_STATE_PATH = './.repo-state.json'
 
 export class RepoManager {
   /**
    * @param {string} did - owner DID
-   * @param {string} privateKeyHex - signing key (hex)
+   * @param {string|{curve?: string, privateKey: string}} key - signing key:
+   *   legacy k256 hex string, or a normalized key object
    * @param {string} statePath - path to state file
    */
-  constructor(did, privateKeyHex, statePath = DEFAULT_STATE_PATH) {
+  constructor(did, key, statePath = DEFAULT_STATE_PATH) {
     this.did = did
-    this.privateKeyHex = privateKeyHex
+    this.key = typeof key === 'string' ? { curve: 'k256', privateKey: key } : key
     this.statePath = statePath
     this.blockstore = new Map()
     this.mst = null
@@ -101,7 +102,7 @@ export class RepoManager {
     // Build commit v3
     const rev = this.nextRev()
     const unsigned = buildUnsignedCommit(this.did, mstRoot, rev, this.commitCid)
-    const commit = await signCommit(unsigned, this.privateKeyHex)
+    const commit = await signCommit(unsigned, this.key)
     const cid = await commitCid(commit)
 
     // Add commit block to blocks
@@ -129,12 +130,8 @@ export class RepoManager {
   }
 
   nextRev() {
-    // Monotonic TID: use time-based; ensure greater than current
-    let tid = generateTID()
-    if (this.rev && tid <= this.rev) {
-      tid = generateTID() // retry once (collision unlikely)
-    }
-    return tid
+    // Monotonic TID strictly after the current rev (handles clock skew).
+    return nextTID(this.rev)
   }
 
   async recordBytes(record) {

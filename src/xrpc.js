@@ -6,9 +6,12 @@
 import { resolveHandle, generateDidWebDocument } from './did.js'
 import { resolveIdentity, handleFromDid } from './identity.js'
 import { createCarFile, cborEncode, cborDecode, cidToBytes, encodeVarint, base32Encode, base64ToBytes, isValidCidString } from './shared.js'
+import { validateAppendEvent, AppendValidationError, MAX_APPEND_BODY_BYTES } from './append.js'
 
-function xrpcError(status, error, message) {
-    return new Response(JSON.stringify({ error, message }), {
+function xrpcError(status, error, message, details = null) {
+    const body = { error, message }
+    if (details && typeof details === 'object') Object.assign(body, details)
+    return new Response(JSON.stringify(body), {
         status,
         headers: { 'Content-Type': 'application/json' }
     })
@@ -44,12 +47,16 @@ function eventsForDid(journal, did) {
  * `hosted` is the set of DIDs this PDS serves (main did:web + publishing
  * accounts); falls back to the single main did when not provided.
  */
-export async function handleXrpc(request, { journal, did, handle, env, hosted, ownHost }) {
+export async function handleXrpc(request, { journal, did, handle, env, hosted, ownHost, ctx, notifyRelay }) {
     const url = new URL(request.url)
     const method = url.pathname.replace('/xrpc/', '')
     const hostedSet = hosted || journal.distinctDids()
 
     switch (method) {
+        case 'com.atproto.worker.appendEvent':
+            return handleAppendEvent(request, {
+                journal, did, handle, env, hosted: hostedSet, ownHost, ctx, notifyRelay
+            })
         case 'com.atproto.repo.getRecord':
             return handleGetRecord(url, journal, hostedSet)
 
@@ -83,6 +90,9 @@ export async function handleXrpc(request, { journal, did, handle, env, hosted, o
         case 'com.atproto.repo.describeRepo':
             return handleDescribeRepo(url, journal, handle, did, env, hostedSet, ownHost)
 
+        case 'com.atproto.worker.snapshot':
+            return handleSnapshot(request, env, journal)
+
         case '_health':
             return handleHealth(journal)
 
@@ -107,6 +117,230 @@ function handleHealth(journal) {
         return xrpcError(503, 'ServiceUnavailable', 'Journal not loaded')
     }
     return xrpcSuccess({ version })
+}
+
+/**
+ * com.atproto.worker.snapshot - the live ledger (or the static seed) as
+ * NDJSON. Public data; used by CLI pull/backup and external tooling.
+ * Supports ?after=<seq>&limit=<n>.
+ */
+async function handleSnapshot(request, env, journal) {
+    if (request.method !== 'GET') {
+        return xrpcError(405, 'MethodNotAllowed', 'snapshot requires GET')
+    }
+
+    const headers = {
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Cache-Control': 'no-store'
+    }
+
+    if (env.FIREHOSE) {
+        const id = env.FIREHOSE.idFromName('main')
+        const stub = env.FIREHOSE.get(id)
+        const url = new URL(request.url)
+        const qs = new URLSearchParams()
+        for (const key of ['after', 'limit']) {
+            const value = url.searchParams.get(key)
+            if (value !== null) qs.set(key, value)
+        }
+        const suffix = qs.toString() ? `?${qs.toString()}` : ''
+        try {
+            const resp = await stub.fetch(`http://ledger/snapshot${suffix}`)
+            if (resp.ok) {
+                const text = await resp.text()
+                // An empty ledger before the first append: fall back to the
+                // static seed so `pull`/backup works on a fresh deployment.
+                // An empty `after=` tail is a legitimate empty result.
+                if (text.trim() || qs.has('after')) {
+                    return new Response(text, { headers })
+                }
+            }
+        } catch (e) {
+            console.error('[snapshot] ledger read failed:', e.message)
+        }
+    }
+
+    // Fallback: the static seed (also what a fresh deployment serves before
+    // the first append seeds the ledger).
+    if (env.ASSETS) {
+        const resp = await env.ASSETS.fetch('https://worker/journal.ndjson')
+        if (resp.ok) return new Response(resp.body, { headers })
+    }
+
+    // Last resort: the already-loaded journal (JOURNAL_CONTENT / tests).
+    const body = journal.events.length
+        ? journal.events.map(e => JSON.stringify(e)).join('\n') + '\n'
+        : ''
+    return new Response(body, { headers })
+}
+
+/**
+ * com.atproto.worker.appendEvent - owner-signed write path (M1 phase 2).
+ *
+ * The owner (browser/CLI) builds the MST/commit/CAR and signs the commit with
+ * a P-256 key. The Worker verifies it, the Firehose ledger DO does the head
+ * CAS + append + firehose broadcast, and we ask the relay to re-crawl.
+ */
+async function handleAppendEvent(request, { did: mainDid, handle, env, hosted, ownHost, ctx, notifyRelay }) {
+    if (request.method !== 'POST') {
+        return xrpcError(405, 'MethodNotAllowed', 'appendEvent requires POST')
+    }
+
+    const declaredLength = parseInt(request.headers.get('Content-Length') || '0', 10)
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_APPEND_BODY_BYTES) {
+        return xrpcError(413, 'PayloadTooLarge', `request body exceeds ${MAX_APPEND_BODY_BYTES} bytes`)
+    }
+
+    let text
+    try {
+        text = await request.text()
+    } catch (e) {
+        return xrpcError(400, 'InvalidRequest', `could not read request body: ${e.message}`)
+    }
+    if (text.length > MAX_APPEND_BODY_BYTES) {
+        return xrpcError(413, 'PayloadTooLarge', `request body exceeds ${MAX_APPEND_BODY_BYTES} bytes`)
+    }
+
+    let body
+    try {
+        body = JSON.parse(text)
+    } catch (e) {
+        return xrpcError(400, 'InvalidRequest', `request body is not valid JSON: ${e.message}`)
+    }
+
+    const event = body?.event
+    if (!event || typeof event !== 'object') {
+        return xrpcError(400, 'InvalidRequest', 'body.event is required')
+    }
+    if (typeof event.did !== 'string' || !event.did) {
+        return xrpcError(400, 'InvalidRequest', 'event.did is required')
+    }
+    if (typeof event.commitCid !== 'string' || !event.commitCid) {
+        return xrpcError(400, 'InvalidRequest', 'event.commitCid is required')
+    }
+
+    // Admission: existing hosted accounts, or the Worker's main did (which
+    // lets a fresh ledger accept its first event before the seed exists).
+    if (!hosted.has(event.did) && event.did !== mainDid) {
+        return xrpcError(400, 'NotHosted', 'Can only append to hosted accounts')
+    }
+
+    if (!env.FIREHOSE) {
+        return xrpcError(503, 'LedgerUnavailable', 'Firehose ledger binding is not configured')
+    }
+    const id = env.FIREHOSE.idFromName('main')
+    const stub = env.FIREHOSE.get(id)
+
+    // Idempotent replay: return the already-stored event *before* checking
+    // the head, so retries still work after the head advanced (and after a
+    // key rotation, since the old event was valid when it was appended).
+    try {
+        const existingResp = await stub.fetch(`http://ledger/event?commitCid=${encodeURIComponent(event.commitCid)}`)
+        if (existingResp.ok) {
+            const existing = await existingResp.json()
+            if (existing.event?.did !== event.did) {
+                return xrpcError(409, 'RepoConflict', 'commitCid already exists for a different account', { head: existing.head || null })
+            }
+            return xrpcSuccess(appendResponse(existing.event))
+        }
+    } catch (e) {
+        console.error('[append] dedupe lookup failed:', e.message)
+    }
+
+    const head = await fetchLedgerHead(stub, event.did)
+
+    // First append against an empty ledger: seed the static journal so the
+    // client's expectedHead (read from ASSETS) matches the ledger head.
+    if (!head?.commitCid) {
+        try {
+            const seedResp = await stub.fetch('http://ledger/seed', { method: 'POST' })
+            if (seedResp.ok) {
+                const seeded = await fetchLedgerHead(stub, event.did)
+                if (seeded?.commitCid) Object.assign(head, seeded)
+            }
+        } catch (e) {
+            console.error('[append] ledger seed failed:', e.message)
+        }
+    }
+
+    // Identity: the DID document's current #atproto key is the only key that
+    // may sign new events.
+    const ident = await resolveIdentity(env, event.did, ownHost)
+    if (!ident || !ident.publicKeyMultibase) {
+        return xrpcError(400, 'IdentityNotFound', 'Cannot resolve the account DID document / #atproto key')
+    }
+
+    try {
+        await validateAppendEvent(event, {
+            head,
+            resolvedKey: ident.publicKeyMultibase
+        })
+    } catch (e) {
+        if (e instanceof AppendValidationError) {
+            const details = { ...(e.details || {}) }
+            if (e.status === 409 && !details.head) details.head = head
+            return xrpcError(e.status, e.error, e.message, details)
+        }
+        console.error('[append] validation error:', e)
+        return xrpcError(500, 'InternalError', 'Failed to validate append event')
+    }
+
+    let appendResp
+    try {
+        appendResp = await stub.fetch('http://ledger/append', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                event,
+                expectedHead: head?.commitCid ?? null,
+                expectedRev: head?.rev ?? null
+            })
+        })
+    } catch (e) {
+        console.error('[append] ledger append failed:', e.message)
+        return xrpcError(502, 'LedgerError', 'Failed to write to the ledger')
+    }
+
+    if (appendResp.status === 409) {
+        const conflict = await appendResp.json().catch(() => ({}))
+        return xrpcError(409, 'RepoConflict',
+            conflict.message || 'Repository head changed; fetch the new head and rebase',
+            { head: conflict.head ?? head })
+    }
+    if (!appendResp.ok) {
+        const err = await appendResp.json().catch(() => ({}))
+        return xrpcError(502, 'LedgerError', err.message || `ledger append failed (${appendResp.status})`)
+    }
+
+    const result = await appendResp.json()
+
+    // New data is immediately visible to this Worker's read model (next
+    // request re-snapshots the ledger); tell the relay so it re-crawls.
+    if (ctx && typeof ctx.waitUntil === 'function' && typeof notifyRelay === 'function') {
+        ctx.waitUntil(notifyRelay(env, handle))
+    }
+
+    return xrpcSuccess(appendResponse(result.event))
+}
+
+function appendResponse(event) {
+    return {
+        uri: `at://${event.did}/${event.collection}/${event.rkey}`,
+        cid: event.recordCid ?? null,
+        commit: { cid: event.commitCid, rev: event.rev },
+        seq: event.offset
+    }
+}
+
+async function fetchLedgerHead(stub, did) {
+    try {
+        const resp = await stub.fetch(`http://ledger/head?did=${encodeURIComponent(did)}`)
+        if (!resp.ok) return { commitCid: null, rev: null, seq: null, mstRoot: null }
+        return await resp.json()
+    } catch (e) {
+        console.error('[append] head lookup failed:', e.message)
+        return { commitCid: null, rev: null, seq: null, mstRoot: null }
+    }
 }
 
 /**

@@ -61,10 +61,12 @@ export class JournalWriter {
         // Preserve caller-provided rev (from commit v3); fall back to generated TID
         const rev = event.rev || generateTID()
 
-        // Add metadata
+        // Add metadata. Schema v2 adds `v` and caller-provided `signingKey`
+        // (the public Multikey used for this event); v1 rows stay readable.
         const fullEvent = {
             offset,
             ...event,
+            v: 2,
             rev,
             prev: this.prevCid,
             prevRev: this.prevRev,

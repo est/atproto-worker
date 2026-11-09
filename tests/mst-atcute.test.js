@@ -5,9 +5,11 @@ import { MST } from '../cli/mst.js'
 import { NodeWrangler, NodeStore, MemoryBlockStore } from '@atcute/mst'
 import * as CID from '@atcute/cid'
 
-const fixtures = JSON.parse(
-  fs.readFileSync('atproto-interop-tests/firehose/commit-proof-fixtures.json', 'utf8'),
-)
+const fixturePath = [
+    'atproto-interop-tests/firehose/commit-proof-fixtures.json',
+    'thirdparty/atproto-interop-tests/firehose/commit-proof-fixtures.json'
+].find(p => fs.existsSync(p))
+const fixtures = JSON.parse(fs.readFileSync(fixturePath, 'utf8'))
 
 /**
  * Build an MST from the given keys using OUR hand-rolled implementation

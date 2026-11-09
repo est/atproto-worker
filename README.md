@@ -1,6 +1,15 @@
 # atproto-worker
 
-A stateless AT Protocol publisher on Cloudflare Workers. Your journal is a signed append-only log (`journal.ndjson`); the Worker serves it via standard atproto endpoints. No database, no mutable state, no KV.
+An AT Protocol publisher / lightweight PDS on Cloudflare Workers. Historically a fully static signed journal; **after M1 (Nov 2026)** runtime writes go to a SQLite ledger in the Firehose Durable Object, and the static `journal.ndjson` is a seed/backup. The owner signs with a P-256 key in the CLI or browser; the Worker never holds a private key.
+
+## M1: owner-signed P-256 + live ledger (Nov 2026)
+
+- New accounts default to **P-256** (`init --curve p256`). Existing K-256 accounts rotate with `rotate-key --curve p256` + `rotate-head`; history does not need re-signing (atproto verifies the head commit only).
+- **Browser console** at `/app/`: the P-256 key lives in the browser (passphrase-encrypted), reads via `getRepo`, writes via `appendEvent`; can also be hosted independently.
+- **Live ledger**: Firehose DO SQLite (`events`/`heads`/`meta`), `POST /xrpc/com.atproto.worker.appendEvent` verifies the signature + head CAS + broadcasts; `GET /xrpc/com.atproto.worker.snapshot` exports NDJSON.
+- **CLI**: `push`/`pull` to sync with the ledger; `rotate-head` re-signs the current head with the new key without changing content.
+- Decision: `docs/ADR/040.arch.owner-signed-p256-repo.md`; design: `docs/phase6.md`.
+- Rule: once the ledger is live, runtime writes go through append; the static journal is only a seed/backup. Official bsky.app clients still require the full PDS write path (M3).
 
 ## 🚀 一键部署（不需要懂 atproto 或 Cloudflare）
 
@@ -31,10 +40,10 @@ A stateless AT Protocol publisher on Cloudflare Workers. Your journal is a signe
                         └───────────────────────┘
 ```
 
-Posting flow: `seal.js post` appends a signed event to `journal.ndjson`
-locally → copy it to `public/journal.ndjson` → deploy. The Worker then
-serves it via XRPC and broadcasts it over the firehose. No database, no
-mutable state, no external static hosting.
+Posting flow (M1): the browser or CLI builds and signs a commit, then POSTs
+it to `appendEvent`; the Firehose DO ledger stores it and broadcasts it over
+the firehose. The static `journal.ndjson` is a seed/backup for a fresh
+deploy. No private key ever reaches the Worker.
 
 ## Quick Start
 
@@ -147,21 +156,34 @@ shows the live status of every step.
 | `/xrpc/com.atproto.sync.listRepos` | List repos |
 | `/xrpc/com.atproto.server.describeServer` | Server description |
 | `/xrpc/com.atproto.identity.resolveHandle` | Resolve handle to DID |
+| `/xrpc/com.atproto.worker.appendEvent` | **Owner-signed write** (P-256 verify + head CAS) |
+| `/xrpc/com.atproto.worker.snapshot` | Export the live ledger as NDJSON (`?after=&limit=`) |
 | `/xrpc/_health` | Health check |
-| `/refresh` | Reload journal from the Worker's own static asset |
-| `/journal.ndjson` | The journal static asset itself |
+| `/refresh` | Seed/refresh, broadcast, and `requestCrawl` |
+| `/journal.ndjson` | Static seed/backup (imported into the ledger on a fresh deploy) |
+| `/app/` | Static owner console (browser P-256 signing) |
 
 ## CLI Commands
 
 ```bash
-node cli/seal.js init [did] [handle]     # Generate keypair
-node cli/seal.js rotate-key              # Generate new keypair
-node cli/seal.js post "text"             # Create a post
-node cli/seal.js like <at-uri> <cid>     # Like a post
-node cli/seal.js repost <at-uri> <cid>   # Repost
-node cli/seal.js follow <did>            # Follow someone
-node cli/seal.js validate                # Validate journal integrity
-node cli/seal.js list                    # List all records
+node cli/seal.js init [did] [handle] [--curve p256|k256]   # Generate keypair (default p256)
+node cli/seal.js rotate-key [--curve p256|k256]            # Rotate key + rewrite did.json
+node cli/seal.js rotate-head                               # Re-sign current head (no content change)
+node cli/seal.js post "text"                               # Create a post (local sign, append journal)
+node cli/seal.js like <at-uri> <cid>                       # Like a post
+node cli/seal.js repost <at-uri> <cid>                     # Repost
+node cli/seal.js follow <did>                              # Follow someone
+node cli/seal.js validate                                  # Validate journal (per-event signingKey/previousPublicKeys)
+node cli/seal.js list                                      # List all records
+node cli/seal.js push [--remote URL] [--account id]        # Push local signed events to the live ledger
+node cli/seal.js pull [--remote URL] [--account id]        # Pull the ledger + rebuild .repo-state
+```
+
+Web UI build/test:
+
+```bash
+npm run build:app   # esbuild -> public/app/app.js
+npm run test:ui     # Playwright + Edge smoke tests
 ```
 
 ## Identity Model
@@ -177,20 +199,24 @@ Both `/.well-known/atproto-did` and `/.well-known/did.json` return consistent id
 - The root `journal.ndjson` (local working copy) is gitignored; the signed
   events in `public/journal.ndjson` are safe to commit (signatures are
   verified by the Worker on load)
-- Worker never holds or uses private keys (signing is CLI-only)
-- Journal chain is validated on load (CID integrity and prev links)
-- Private key uses secp256k1 (k256), matching atproto default
+- Worker never holds or uses private keys (signing is CLI- or browser-only)
+- Read path validates the CID/prev chain but **does not verify signatures** (ADR-030 trust boundary)
+- `appendEvent` **must verify P-256 signature + low-S + head/CAR** (ADR-040)
+- New accounts default to P-256 (WebCrypto-native); K-256 history remains readable
+- Browser keys are PBKDF2 + AES-GCM encrypted in localStorage; see `docs/phase6.md` §6.8 for CSP/independent-hosting guidance
 
 ## Known Limitations
 
-- **Firehose**: `#commit` events have empty `blocks` — consumers needing full CAR data won't work
-- **Interactions**: Cron fetches likes/reposts but only logs them, no persistence yet
-- **Write operations**: XRPC write endpoints return 501 — use CLI for all writes
-- **Journal must be append-only**: Refresh assumes events are only appended, never reordered
+- **Not a full PDS**: official bsky.app clients still cannot log in/post; that requires M3 (Worker-held repo key + sessions/JWT + server-side signing)
+- **Blobs**: browser image/avatar upload is not implemented (existing static blob publishing still works)
+- **Full MST verification**: append checks root/CAR presence, not that the record leaf is reachable from `mstRoot`
+- **Rate limiting / self-registration**: append is limited to already-hosted DIDs; no per-DID write rate limits yet
+- **Rotation replay boundary**: a relay replaying old K-256 events from seq -1 may fail verification because the current did.json is P-256 (normal cursors are unaffected)
+- The static journal is only a seed/backup; do not use local-append + deploy as a runtime write path once the ledger is live
 
 ## Project Status
 
-Working prototype. Core read path (XRPC, firehose, DID documents) and write path (CLI signing, journal append) are functional. Tests pass including atproto interop tests (CID/CBOR encoding, handle/DID syntax).
+M1 is functional: read path (XRPC, firehose, DID documents), write path (CLI/browser P-256 signing + DO ledger), static UI, and CLI push/pull. `npm test` and `npm run test:ui` pass; official `@atproto/repo.verifyRepoCar` accepts the P-256 commit/CAR. The main account is rotated to P-256 locally, pending `wrangler login` + deploy.
 
 ## License
 

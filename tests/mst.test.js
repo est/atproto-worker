@@ -138,7 +138,11 @@ test('car - createCar produces valid root', async () => {
 
 test('mst - matches official commit-proof fixtures', async () => {
     const fs = await import('node:fs')
-    const fixtures = JSON.parse(fs.readFileSync('atproto-interop-tests/firehose/commit-proof-fixtures.json', 'utf8'))
+    const fixturePath = [
+        'atproto-interop-tests/firehose/commit-proof-fixtures.json',
+        'thirdparty/atproto-interop-tests/firehose/commit-proof-fixtures.json'
+    ].find(p => fs.existsSync(p))
+    const fixtures = JSON.parse(fs.readFileSync(fixturePath, 'utf8'))
     for (const f of fixtures) {
         const bs = new Map()
         let mst = await MST.create(bs, [], 0)

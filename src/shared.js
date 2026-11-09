@@ -19,6 +19,15 @@ export function base64ToBytes(b64) {
     return bytes
 }
 
+/**
+ * Uint8Array -> standard base64 (works in both CF Workers and Node.js).
+ */
+export function bytesToBase64(bytes) {
+    let bin = ''
+    for (const b of bytes) bin += String.fromCharCode(b)
+    return btoa(bin)
+}
+
 export function generateTID() {
   let timestamp = Date.now() * 1000 // microseconds
 
@@ -39,6 +48,54 @@ export function generateTID() {
   }
 
   return tid
+}
+
+/**
+ * Monotonic TID after `prev` (13-char sortable base32). Mirrors the
+ * reference TID.next(): never goes backwards, keeps the previous clock id.
+ * Also handles clock skew (prev in the future) by using prev.timestamp + 1.
+ */
+export function nextTID(prev) {
+  const nowMicros = Date.now() * 1000
+  let timestamp = nowMicros
+  let clockid = 0
+
+  if (prev) {
+    if (typeof prev !== 'string' || prev.length !== 13) {
+      throw new Error(`Invalid TID: ${prev}`)
+    }
+    let n = 0n
+    for (const ch of prev) {
+      const idx = B32_SORTISH.indexOf(ch)
+      if (idx === -1) throw new Error(`Invalid TID character: ${ch}`)
+      n = (n << 5n) | BigInt(idx)
+    }
+    const prevTs = n >> 10n
+    clockid = Number(n & 0x3ffn)
+    if (BigInt(nowMicros) <= prevTs) {
+      timestamp = Number(prevTs + 1n)
+    }
+  }
+
+  const combined = (BigInt(timestamp) << 10n) | BigInt(clockid & 0x3ff)
+  let tid = ''
+  let n = combined
+  for (let i = 0; i < 13; i++) {
+    tid = B32_SORTISH[Number(n & 31n)] + tid
+    n >>= 5n
+  }
+  return tid
+}
+
+// ============ SHA-256 ============
+
+/**
+ * SHA-256 of a string or bytes. Uses WebCrypto (Worker/browser/Node 22+).
+ */
+export async function sha256(input) {
+  const data = typeof input === 'string' ? new TextEncoder().encode(input) : input
+  const hash = await crypto.subtle.digest('SHA-256', data)
+  return new Uint8Array(hash)
 }
 
 // ============ Base32 (RFC 4648 lowercase) ============
@@ -97,6 +154,13 @@ export function cidToBytes(cidStr) {
   throw new Error('Unsupported CID format: ' + cidStr)
 }
 
+/**
+ * CIDv1 bytes -> base32 multibase string ('b...').
+ */
+export function bytesToCid(cidBytes) {
+  return 'b' + base32Encode(cidBytes)
+}
+
 export async function computeCID(value) {
   return computeCidFromBytes(cborEncode(value))
 }
@@ -139,6 +203,10 @@ export async function computeBlobCid(bytes) {
  */
 export function isValidCidString(cid) {
   return typeof cid === 'string' && /^b[a-z2-7]{58}$/.test(cid)
+}
+
+export function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
 /**
@@ -386,6 +454,47 @@ export function encodeVarint(n) {
   return new Uint8Array(bytes)
 }
 
+export function decodeVarint(bytes, offset = 0) {
+  let value = 0
+  let shift = 0
+  while (true) {
+    if (offset >= bytes.length) throw new Error('Unexpected end of varint')
+    const b = bytes[offset++]
+    value += (b & 0x7f) * 2 ** shift
+    if ((b & 0x80) === 0) break
+    shift += 7
+    if (shift > 49) throw new Error('Varint too long')
+  }
+  return { value, offset }
+}
+
+/**
+ * Read one CIDv1 from bytes at offset. Returns the CID string plus the new
+ * offset. Supports the multihash shapes atproto uses (sha2-256).
+ */
+export function readCidBytes(bytes, offset = 0) {
+  const start = offset
+  const version = decodeVarint(bytes, offset)
+  offset = version.offset
+  const codec = decodeVarint(bytes, offset)
+  offset = codec.offset
+  const hashCode = decodeVarint(bytes, offset)
+  offset = hashCode.offset
+  const hashLen = decodeVarint(bytes, offset)
+  offset = hashLen.offset
+  const digest = bytes.slice(offset, offset + hashLen.value)
+  offset += hashLen.value
+  const cidBytes = bytes.slice(start, offset)
+  return {
+    version: version.value,
+    codec: codec.value,
+    hashCode: hashCode.value,
+    digest,
+    cid: bytesToCid(cidBytes),
+    offset
+  }
+}
+
 // ============ CAR File ============
 
 export function createCarFile(rootCid, blocks = []) {
@@ -416,4 +525,34 @@ export function createCarFile(rootCid, blocks = []) {
   }
 
   return result
+}
+
+/**
+ * Parse a CAR v1 file into its roots and blocks.
+ * @returns {{roots: string[], blocks: Map<string, Uint8Array>, header: any}}
+ */
+export function readCarFile(carBytes) {
+  const bytes = carBytes instanceof Uint8Array ? carBytes : new Uint8Array(carBytes)
+  let offset = 0
+
+  const headerLen = decodeVarint(bytes, offset)
+  offset = headerLen.offset
+  const header = cborDecode(bytes.slice(offset, offset + headerLen.value))
+  offset += headerLen.value
+
+  const roots = (header.roots || []).map(r => (typeof r === 'string' ? r : r.$link))
+  const blocks = new Map()
+
+  while (offset < bytes.length) {
+    const blockLen = decodeVarint(bytes, offset)
+    offset = blockLen.offset
+    const end = offset + blockLen.value
+    if (end > bytes.length) throw new Error('CAR block extends past end of file')
+    const blockBytes = bytes.slice(offset, end)
+    const parsed = readCidBytes(blockBytes, 0)
+    blocks.set(parsed.cid, blockBytes.slice(parsed.offset))
+    offset = end
+  }
+
+  return { roots, blocks, header }
 }

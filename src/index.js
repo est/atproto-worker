@@ -103,7 +103,9 @@ export default {
                 response = await handleXrpc(request, {
                     journal, did, handle, env,
                     hosted: journal.distinctDids(),
-                    ownHost: url.host
+                    ownHost: url.host,
+                    ctx,
+                    notifyRelay
                 })
             }
             // Root: deployment checklist page (HTML) or server info (JSON)
@@ -123,6 +125,9 @@ export default {
                         },
                         endpoints: {
                             xrpc: '/xrpc/',
+                            app: '/app/',
+                            append: '/xrpc/com.atproto.worker.appendEvent',
+                            snapshot: '/xrpc/com.atproto.worker.snapshot',
                             refresh: '/refresh',
                             atprotoDid: '/.well-known/atproto-did'
                         }
@@ -221,9 +226,11 @@ async function broadcastNewEvents(journal, env) {
     const newEvents = journal.events.filter(e => e.offset > cursor)
     if (newEvents.length === 0) return []
 
+    // Pass the explicit hosted set: a single PDS can host multiple DIDs, and
+    // the old ownerDid fallback silently dropped every other account.
     const resp = await stub.fetch('http://localhost/broadcast', {
         method: 'POST',
-        body: JSON.stringify({ events: newEvents }),
+        body: JSON.stringify({ events: newEvents, dids: [...journal.distinctDids()] }),
         headers: { 'Content-Type': 'application/json' }
     })
     if (!resp.ok) {

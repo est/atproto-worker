@@ -52,11 +52,11 @@ export async function checkSetup(env, journal, host) {
     checks.push({
         id: 'journal',
         phase: 1,
-        label: 'Journal 已加载（数据源就绪）',
+        label: 'Journal / 活账本（数据源就绪）',
         status: journal && journal.loaded ? 'ok' : (journal ? 'warn' : 'missing'),
         value: journalState,
-        hint: 'Worker 从静态资源加载你的帖子账本并验证完整性（无 KV、无数据库）。',
-        command: `curl https://${host}/refresh   # 手动触发重新加载`
+        hint: '优先从 Firehose DO 的 SQLite 活账本读取；静态 journal 只做 seed/备份（M1/ADR-040）。',
+        command: `curl https://${host}/refresh   # seed/刷新 + 广播`
     })
 
     checks.push({
@@ -95,8 +95,18 @@ export async function checkSetup(env, journal, host) {
         label: '身份文件 .well-known/did.json（公钥自发现）',
         status: identityOk ? 'ok' : 'missing',
         value: identityOk ? '已部署（公钥随文件自动发现，无需环境变量）' : '未部署',
-        hint: '主账号公钥由本地 `node cli/seal.js init` 生成的身份文件提供，随 Worker 部署，不再需要环境变量。',
-        command: `node cli/seal.js init did:web:${host} ${host}   # 生成 public/.well-known/did.json 后重新部署`
+        hint: '主账号公钥由 `node cli/seal.js init --curve p256` 生成的身份文件提供（默认 P-256 Multikey）；旧 K-256 账号用 rotate-key + rotate-head 轮换。',
+        command: `node cli/seal.js init did:web:${host} ${host} --curve p256   # 生成 public/.well-known/did.json 后重新部署`
+    })
+
+    checks.push({
+        id: 'web_ui',
+        phase: 2,
+        label: '浏览器 owner console（可选）',
+        status: 'ok',
+        value: `https://${host}/app/`,
+        hint: 'P-256 私钥只在浏览器；读 getRepo、写 appendEvent。也可独立静态托管。',
+        command: ''
     })
 
     // Phase 3 — 可选：外部托管 journal（默认用随 Worker 部署的静态资产，无需设置）
@@ -198,8 +208,8 @@ export async function renderChecklistPage(env, journal, host) {
             <h3>下一步：生成身份文件（唯一需要手动的一步，无需任何环境变量）</h3>
             <ol>
                 <li><b>本地生成密钥对 + 身份文件</b>（需要 Node.js，一次性）：复制下面的命令到终端执行
-                    <div class="cmd"><code>git clone https://github.com/est/atproto-worker && cd atproto-worker && npm install && node cli/seal.js init did:web:${escapeHtml(host)} ${escapeHtml(host)}</code>
-                    <button class="copy" data-cmd="git clone https://github.com/est/atproto-worker && cd atproto-worker && npm install && node cli/seal.js init did:web:${escapeHtml(host)} ${escapeHtml(host)}">复制</button></div>
+                    <div class="cmd"><code>git clone https://github.com/est/atproto-worker && cd atproto-worker && npm install && node cli/seal.js init did:web:${escapeHtml(host)} ${escapeHtml(host)} --curve p256</code>
+                    <button class="copy" data-cmd="git clone https://github.com/est/atproto-worker && cd atproto-worker && npm install && node cli/seal.js init did:web:${escapeHtml(host)} ${escapeHtml(host)} --curve p256">复制</button></div>
                 </li>
                 <li><b>提交并部署</b>：init 已生成 <code>public/.well-known/did.json</code> 与 <code>public/.well-known/atproto-did</code>（公钥自发现，Worker 不需要任何环境变量）</li>
                 <li>回到本页刷新，此项即变绿 ✅</li>
@@ -212,16 +222,12 @@ export async function renderChecklistPage(env, journal, host) {
         <div class="next done">
             <h3>🎉 全部就绪！现在发布你的第一条帖子</h3>
             <ol>
-                <li>本地执行（在刚才 clone 的目录里）：
-                    <div class="cmd"><code>node cli/seal.js post "你好，atproto！"</code><button class="copy" data-cmd='node cli/seal.js post "你好，atproto！"'>复制</button></div>
+                <li><b>浏览器（推荐，M1）</b>：打开 <a href="https://${escapeHtml(host)}/app/">https://${escapeHtml(host)}/app/</a>，
+                    生成或导入 P-256 key，直接发帖；数据写入活账本，无需 deploy/refresh。</li>
+                <li><b>CLI</b>（在 clone 的目录里）：发帖并推到活账本：
+                    <div class="cmd"><code>node cli/seal.js post "你好，atproto！" && node cli/seal.js push --remote https://${escapeHtml(host)}</code><button class="copy" data-cmd='node cli/seal.js post "你好，atproto！" && node cli/seal.js push --remote https://${escapeHtml(host)}'>复制</button></div>
                 </li>
-                <li>同步到部署资产：
-                    <div class="cmd"><code>cp journal.ndjson public/journal.ndjson && git add public/journal.ndjson && git commit -m "post" && git push</code><button class="copy" data-cmd="cp journal.ndjson public/journal.ndjson && git add public/journal.ndjson && git commit -m "post" && git push">复制</button></div>
-                </li>
-                <li>让 Worker 广播给联邦（部署完成后执行）：
-                    <div class="cmd"><code>curl https://${escapeHtml(host)}/refresh</code><button class="copy" data-cmd="curl https://${escapeHtml(host)}/refresh">复制</button></div>
-                </li>
-                <li>等待几分钟，点击下方「检查联邦收录」即可在 Bluesky 上看到你的帖子。</li>
+                <li>活账本写入后 Worker 会广播 + requestCrawl；等待几分钟，点击下方「检查联邦收录」即可在 Bluesky 上看到。</li>
             </ol>
         </div>`
     }

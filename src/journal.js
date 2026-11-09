@@ -13,10 +13,34 @@ export function parseJournal(content) {
     return content.trim().split('\n').map(line => JSON.parse(line))
 }
 
+// Module-level snapshot cache. The Worker isolate serves many requests; the
+// ledger head seq is a cheap cache key, so an unchanged ledger is not re-sent
+// on every request. Keyed by the FIREHOSE binding object (tests create a new
+// binding per case, so they don't leak into each other).
+const ledgerCaches = new WeakMap()
+
+function cacheFor(env) {
+    const key = env?.FIREHOSE
+    if (!key || (typeof key !== 'object' && typeof key !== 'function')) return null
+    let cache = ledgerCaches.get(key)
+    if (!cache) {
+        cache = { seq: -1, events: null }
+        ledgerCaches.set(key, cache)
+    }
+    return cache
+}
+
+function ledgerStub(env) {
+    if (!env?.FIREHOSE) return null
+    const id = env.FIREHOSE.idFromName('main')
+    return env.FIREHOSE.get(id)
+}
+
 /**
  * Journal state manager for worker
- * - Reads from static assets (ASSETS binding) or inline JOURNAL_CONTENT
- * - Syncs from ASSETS on /refresh call
+ * - Reads from the Firehose ledger DO (SQLite), falling back to static assets
+ *   (ASSETS) or inline JOURNAL_CONTENT for seed-only/dev mode
+ * - /refresh pulls the ledger snapshot (seeding it first only when empty)
  */
 export class Journal {
     constructor(env) {
@@ -28,12 +52,19 @@ export class Journal {
     }
 
     /**
-     * Load journal from static assets or inline content
-     * Order: ASSETS binding → JOURNAL_CONTENT (local dev)
+     * Load journal. Primary source: ledger DO /snapshot (ADR-040 / phase6
+     * §4.4). Fallbacks: ASSETS binding → JOURNAL_CONTENT (local dev).
      */
     async load() {
         if (this.loaded) return
 
+        const fromLedger = await this.loadFromLedger()
+        if (!fromLedger) await this.loadFromAssets()
+
+        this.loaded = true
+    }
+
+    async loadFromAssets() {
         let content = null
 
         // Prefer static assets (journal.ndjson deployed with the Worker)
@@ -55,8 +86,50 @@ export class Journal {
             this.events = events
             this.index()
         }
+    }
 
-        this.loaded = true
+    /**
+     * Load the full ledger snapshot, reusing the module cache when the head
+     * seq has not changed. Returns false when the ledger is unavailable/empty.
+     */
+    async loadFromLedger() {
+        const stub = ledgerStub(this.env)
+        if (!stub) return false
+
+        try {
+            let maxSeq = null
+            const statsResp = await stub.fetch('http://ledger/stats')
+            if (statsResp.ok) {
+                const stats = await statsResp.json()
+                maxSeq = stats.maxSeq
+                if ((stats.eventCount ?? 0) === 0) return false
+            }
+
+            const cache = cacheFor(this.env)
+            if (cache && cache.events && maxSeq !== null && cache.seq === maxSeq) {
+                this.events = cache.events
+                this.index()
+                return true
+            }
+
+            const resp = await stub.fetch('http://ledger/snapshot')
+            if (!resp.ok) return false
+            const events = parseJournal(await resp.text())
+            if (events.length === 0) return false
+
+            await this.validate(events)
+            this.events = events
+            this.index()
+
+            if (cache) {
+                cache.seq = events[events.length - 1].offset ?? maxSeq ?? -1
+                cache.events = events
+            }
+            return true
+        } catch (e) {
+            console.error('Ledger load failed, falling back to ASSETS:', e.message)
+            return false
+        }
     }
 
     /**
@@ -73,10 +146,51 @@ export class Journal {
     }
 
     /**
-     * Refresh journal from static assets (self-hosted) or HTTP source
-     * Validates chain integrity before accepting new data
+     * Refresh journal. Once a ledger exists it is the only write target: we
+     * re-snapshot it instead of re-importing ASSETS (phase6 §6.5). When the
+     * ledger is empty we seed it from ASSETS once, then snapshot. The old
+     * ASSETS/JOURNAL_URL behavior remains as a seed-only/dev fallback.
      */
     async refresh() {
+        const stub = ledgerStub(this.env)
+        if (stub) {
+            try {
+                const statsResp = await stub.fetch('http://ledger/stats')
+                let empty = false
+                if (statsResp.ok) {
+                    const stats = await statsResp.json()
+                    empty = (stats.eventCount ?? 0) === 0
+                }
+
+                if (empty) {
+                    // Seed only when empty; /seed is idempotent and never
+                    // overwrites live events.
+                    const seedResp = await stub.fetch('http://ledger/seed', { method: 'POST' })
+                    if (!seedResp.ok) {
+                        console.warn(`[journal] ledger seed failed: ${seedResp.status}`)
+                    }
+                }
+
+                const resp = await stub.fetch('http://ledger/snapshot')
+                if (resp.ok) {
+                    const events = parseJournal(await resp.text())
+                    if (events.length > 0) {
+                        await this.validate(events)
+                        this.events = events
+                        this.index()
+                        const cache = cacheFor(this.env)
+                        if (cache) {
+                            cache.seq = events[events.length - 1].offset ?? -1
+                            cache.events = events
+                        }
+                        return { eventCount: this.events.length }
+                    }
+                }
+            } catch (e) {
+                console.error('[journal] ledger refresh failed, falling back to ASSETS:', e.message)
+            }
+        }
+
         let content = null
 
         // Prefer static assets: journal.ndjson is deployed with the Worker,
@@ -102,7 +216,7 @@ export class Journal {
         }
 
         if (!content) {
-            throw new Error('No journal source available (ASSETS or JOURNAL_URL)')
+            throw new Error('No journal source available (ledger, ASSETS, or JOURNAL_URL)')
         }
         const newEvents = parseJournal(content)
 
@@ -119,7 +233,11 @@ export class Journal {
      * Validate journal chain integrity (CID chain and prev links).
      * The journal holds events from all hosted accounts in one file, so
      * chain integrity is tracked PER DID (each account has its own commit
-     * chain). Offsets stay globally monotonic (single file = firehose seq).
+     * chain). Offsets stay globally monotonic; schema v2 redefines `offset`
+     * as a logical ledger seq rather than a file byte offset, but the
+     * monotonicity requirement is unchanged. Signature verification is NOT
+     * done here (ADR-030: reads don't verify; the append write path does).
+     * Unknown/extra v2 fields (v, signingKey, ...) are tolerated.
      * Throws on validation failure
      */
     async validate(events) {
@@ -264,6 +382,10 @@ export class Journal {
      */
     getCurrentSeq() {
         if (this.events.length === 0) return 0
-        return this.events[this.events.length - 1].offset
+        let max = -1
+        for (const event of this.events) {
+            if (typeof event.offset === 'number' && event.offset > max) max = event.offset
+        }
+        return max >= 0 ? max : 0
     }
 }

@@ -1,5 +1,6 @@
 # === Secrets & sensitive data ===
 config.json
+config.json.bak
 journal.ndjson
 !public/journal.ndjson
 .env
@@ -33,6 +34,8 @@ dist/
 atproto-interop-tests
 atproto-reference
 indigo
+thirdparty/
+.tmp/
 .mimocode
 *.sublime-*
 .repo-state.json

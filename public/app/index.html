@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src *; img-src 'self' data:;">
+  <meta name="referrer" content="no-referrer">
+  <title>atproto owner console</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <h1>atproto owner console</h1>
+        <p class="tagline">P-256 signing stays in this browser. The Worker is only a channel.</p>
+      </div>
+      <div class="status" aria-live="polite">
+        <span id="status-dot" class="dot dot-idle" aria-hidden="true"></span>
+        <span id="status-text">Not connected</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <!-- ===================== Setup ===================== -->
+    <section id="setup-view" class="card hidden" aria-labelledby="setup-title">
+      <h2 id="setup-title">Set up the owner key</h2>
+      <p class="muted">
+        This page generates (or imports) a P-256 repo key and encrypts it with your
+        passphrase before storing it in this browser. The private key is never sent
+        to the Worker, put in a URL, or written to localStorage in plaintext.
+      </p>
+
+      <div class="field-grid">
+        <label class="field">
+          <span>DID</span>
+          <input id="setup-did" type="text" spellcheck="false" autocomplete="off" placeholder="did:web:example.com">
+        </label>
+        <label class="field">
+          <span>Handle</span>
+          <input id="setup-handle" type="text" spellcheck="false" autocomplete="off" placeholder="example.com">
+        </label>
+      </div>
+      <label class="field">
+        <span>Worker URL</span>
+        <input id="setup-worker" type="url" spellcheck="false" autocomplete="off" placeholder="https://pds.example.com">
+        <small class="hint">The page may be hosted here or anywhere else. CORS is enabled on the Worker.</small>
+      </label>
+
+      <fieldset class="mode-group">
+        <legend>Key source</legend>
+        <label class="radio">
+          <input type="radio" name="key-mode" id="mode-generate" value="generate" checked>
+          <span>Generate a new P-256 keypair</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="key-mode" id="mode-import" value="import">
+          <span>Import the existing CLI key (PKCS#8 base64)</span>
+        </label>
+      </fieldset>
+
+      <label id="import-field" class="field hidden">
+        <span>PKCS#8 base64 private key</span>
+        <textarea id="setup-import" rows="3" spellcheck="false" autocomplete="off"
+          placeholder="Paste the base64 value of config.json privateKey (starts with MIG... usually)"></textarea>
+        <small class="hint">Read only from your paste. This page never fetches config.json.</small>
+      </label>
+
+      <label class="field">
+        <span>Current DID document key (optional)</span>
+        <input id="setup-expected" type="text" spellcheck="false" autocomplete="off" placeholder="zDna...">
+        <small class="hint">If provided, the page verifies the generated/imported key matches it before saving.</small>
+      </label>
+
+      <div class="field-grid">
+        <label class="field">
+          <span>Passphrase</span>
+          <input id="setup-passphrase" type="password" autocomplete="new-password" minlength="8">
+        </label>
+        <label class="field">
+          <span>Confirm passphrase</span>
+          <input id="setup-passphrase2" type="password" autocomplete="new-password" minlength="8">
+        </label>
+      </div>
+      <p class="hint">
+        PBKDF2-SHA256 (210,000 iterations) + AES-GCM. Use a long passphrase. If you
+        lose both the passphrase and the exported encrypted backup, the key is gone.
+      </p>
+
+      <div class="button-row">
+        <button id="create-key-btn" class="primary" type="button">Create encrypted key</button>
+      </div>
+      <p id="setup-error" class="notice error hidden" role="alert"></p>
+    </section>
+
+    <!-- ===================== Unlock ===================== -->
+    <section id="unlock-view" class="card hidden" aria-labelledby="unlock-title">
+      <h2 id="unlock-title">Unlock your key</h2>
+      <p class="muted">An encrypted owner key was found in this browser.</p>
+
+      <dl class="meta-list">
+        <dt>DID</dt><dd id="unlock-did" class="mono"></dd>
+        <dt>Handle</dt><dd id="unlock-handle"></dd>
+        <dt>Worker</dt><dd id="unlock-worker" class="mono"></dd>
+        <dt>Public key</dt><dd id="unlock-key" class="mono wrap"></dd>
+      </dl>
+
+      <label class="field">
+        <span>Passphrase</span>
+        <input id="unlock-passphrase" type="password" autocomplete="current-password">
+      </label>
+      <div class="button-row">
+        <button id="unlock-btn" class="primary" type="button">Unlock</button>
+        <button id="export-backup-btn" class="secondary" type="button">Export encrypted backup</button>
+        <button id="forget-key-btn" class="danger" type="button">Forget key</button>
+      </div>
+      <p id="unlock-error" class="notice error hidden" role="alert"></p>
+    </section>
+
+    <!-- ===================== App ===================== -->
+    <div id="app-view" class="hidden">
+      <section class="card" aria-labelledby="account-title">
+        <div class="card-heading">
+          <div>
+            <h2 id="account-title">Account</h2>
+            <p class="muted">Owner-signed repo access. No private material leaves this page.</p>
+          </div>
+          <div class="button-row compact">
+            <button id="refresh-btn" class="secondary" type="button">Refresh repo</button>
+            <button id="lock-btn" class="secondary" type="button">Lock</button>
+            <button id="export-backup-btn-2" class="secondary" type="button">Backup</button>
+          </div>
+        </div>
+        <dl class="meta-list">
+          <dt>DID</dt><dd id="meta-did" class="mono wrap"></dd>
+          <dt>Handle</dt><dd id="meta-handle"></dd>
+          <dt>Worker</dt><dd id="meta-worker" class="mono wrap"></dd>
+          <dt>Public key</dt><dd id="meta-key" class="mono wrap"></dd>
+        </dl>
+      </section>
+
+      <div class="two-col">
+        <section class="card" aria-labelledby="head-title">
+          <h2 id="head-title">Repo head</h2>
+          <dl class="meta-list">
+            <dt>Commit CID</dt><dd id="head-cid" class="mono wrap">—</dd>
+            <dt>Rev</dt><dd id="head-rev" class="mono">—</dd>
+            <dt>Verification</dt><dd id="head-verified">—</dd>
+          </dl>
+          <p id="head-error" class="notice error hidden" role="alert"></p>
+        </section>
+
+        <section class="card" aria-labelledby="didjson-title">
+          <h2 id="didjson-title">Publish this DID document</h2>
+          <p class="hint">
+            Publish this JSON at <code>/.well-known/did.json</code> on the DID's host
+            before the Worker will accept a write. The <code>#atproto</code> key must
+            equal the public key above.
+          </p>
+          <pre id="didjson" class="code-block"></pre>
+          <div class="button-row compact">
+            <button id="copy-didjson-btn" class="secondary" type="button">Copy JSON</button>
+            <button id="check-did-btn" class="secondary" type="button">Check published key</button>
+          </div>
+          <p id="didjson-status" class="hint" aria-live="polite"></p>
+        </section>
+      </div>
+
+      <section class="card" aria-labelledby="compose-title">
+        <h2 id="compose-title">Compose</h2>
+        <label class="field">
+          <span>Post text</span>
+          <textarea id="compose-text" rows="4" maxlength="3000" placeholder="What is happening?"></textarea>
+          <small class="hint"><span id="compose-count">0</span> characters. Signed locally with P-256, then sent as one append event.</small>
+        </label>
+        <div class="button-row">
+          <button id="post-btn" class="primary" type="button">Sign &amp; post</button>
+        </div>
+        <p id="compose-status" class="notice hidden" role="status"></p>
+      </section>
+
+      <section class="card" aria-labelledby="records-title">
+        <div class="card-heading">
+          <h2 id="records-title">Records</h2>
+          <span id="records-count" class="pill">0</span>
+        </div>
+        <div id="records" class="record-list"></div>
+      </section>
+
+      <section class="card" aria-labelledby="log-title">
+        <div class="card-heading">
+          <h2 id="log-title">Activity log</h2>
+          <button id="clear-log-btn" class="link-button" type="button">clear</button>
+        </div>
+        <div id="log" class="log" role="log" aria-live="polite"></div>
+      </section>
+
+      <details class="card help">
+        <summary>How this works and what it trusts</summary>
+        <div class="help-body">
+          <p>
+            The Worker is a <strong>channel</strong>, not a signer. It stores and serves
+            the repo, verifies the P-256 signature on each append event, and relays the
+            result. It never receives the private key.
+          </p>
+          <p>
+            The key is <strong>owner-side</strong>: it is encrypted with your passphrase
+            and kept in this browser's localStorage. Signing happens with WebCrypto in
+            this tab. The private key is not placed in a URL, a log, or a request body.
+          </p>
+          <p>
+            The page itself is a trust boundary. When the Worker hosts it, a compromised
+            Worker could serve modified JavaScript and use your unlocked key as a signing
+            oracle. For stronger security, host these same files on an independent static
+            origin (or run them locally) and point them at the Worker URL. Use the
+            <em>Backup</em> button to keep an encrypted copy, and lock the page when done.
+          </p>
+          <p>
+            A write carries a client-built MST/commit/CAR. On <code>409 RepoConflict</code>
+            the page discards the local commit and refuses to silently re-sign; refresh and
+            retry from the new head.
+          </p>
+        </div>
+      </details>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p>No third-party scripts, no telemetry. One HTML file, one CSS file, one bundled ES module.</p>
+  </footer>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

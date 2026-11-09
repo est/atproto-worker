@@ -19,6 +19,7 @@
 import fs from 'node:fs'
 import { ProxyAgent } from 'undici'
 import { JournalWriter } from './journal.js'
+import { normalizeKey } from './crypto.js'
 
 const WORKER = process.env.WORKER_URL || 'https://atproto-worker.yiesty.workers.dev'
 const DID = process.env.OWNER_DID || 'did:web:atproto-worker.yiesty.workers.dev'
@@ -54,20 +55,42 @@ async function report(name, url, sliceLen = 100) {
 async function main() {
     console.log('=== 1. Local journal integrity ===')
     try {
-        const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'))
+        const rawConfig = JSON.parse(fs.readFileSync('./config.json', 'utf8'))
+        const config = normalizeKey(rawConfig)
         if (!config.publicKey) {
             throw new Error('config.json missing publicKey (run `node cli/seal.js init` first)')
         }
         const journal = new JournalWriter('./journal.ndjson')
         const events = journal.readAll()
-        const { verifyCommitSig, commitCid } = await import('./atproto.js')
+        const { verifyCommitSig, verifyCommitSigWithMultikey, commitCid } = await import('./atproto.js')
+        const previousPublicKeys = Array.isArray(rawConfig.previousPublicKeys)
+            ? rawConfig.previousPublicKeys
+            : []
         let ok = 0
         for (const e of events) {
-            if (e.commitCid) {
-                const sigOk = await verifyCommitSig(e.commit, config.publicKey)
-                const cidOk = (await commitCid(e.commit)) === e.commitCid
-                if (sigOk && cidOk) ok++
+            if (!e.commitCid) continue
+
+            let sigOk = false
+            if (e.signingKey) {
+                try {
+                    sigOk = await verifyCommitSigWithMultikey(e.commit, e.signingKey)
+                } catch {
+                    sigOk = false
+                }
+            } else {
+                for (const candidate of [config, ...previousPublicKeys]) {
+                    try {
+                        sigOk = typeof candidate === 'string'
+                            ? await verifyCommitSigWithMultikey(e.commit, candidate)
+                            : await verifyCommitSig(e.commit, candidate)
+                    } catch {
+                        sigOk = false
+                    }
+                    if (sigOk) break
+                }
             }
+            const cidOk = (await commitCid(e.commit)) === e.commitCid
+            if (sigOk && cidOk) ok++
         }
         console.log(`  ${ok}/${events.length} commits verified`)
     } catch (e) {

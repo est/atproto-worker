@@ -4,7 +4,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { computeCID, cborEncode } from '../cli/crypto.js'
 
-const INTEROP_DIR = '/Users/me/edev/atproto-interop-tests'
+const EXTERNAL_INTEROP_DIR = '/Users/me/edev/atproto-interop-tests'
+const INTEROP_DIR = fs.existsSync(EXTERNAL_INTEROP_DIR)
+    ? EXTERNAL_INTEROP_DIR
+    : new URL('../thirdparty/atproto-interop-tests', import.meta.url).pathname
 
 test('interop - data-model (CID/CBOR)', async () => {
     const fixturesPath = path.join(INTEROP_DIR, 'data-model/data-model-fixtures.json')

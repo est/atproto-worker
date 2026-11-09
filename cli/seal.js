@@ -3,22 +3,23 @@
  * ATProto signing CLI
  * 
  * Usage:
- *   node cli/sign.js init              # Generate keypair
- *   node cli/sign.js post "Hello!"     # Create a post
- *   node cli/sign.js like at://...     # Like a post
- *   node cli/sign.js repost at://...   # Repost
- *   node cli/sign.js follow did:...    # Follow someone
- *   node cli/sign.js validate          # Validate journal
- *   node cli/sign.js list              # List all records
+ *   node cli/seal.js init              # Generate keypair
+ *   node cli/seal.js post "Hello!"     # Create a post
+ *   node cli/seal.js like at://...     # Like a post
+ *   node cli/seal.js repost at://...   # Repost
+ *   node cli/seal.js follow did:...    # Follow someone
+ *   node cli/seal.js validate          # Validate journal
+ *   node cli/seal.js list              # List all records
  */
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { generateKeypair, sign, publicKeyToMultibase, computeCID } from './crypto.js'
+import { generateKeypair, generateKeypairP256, publicKeyToMultibase, normalizeKey } from './crypto.js'
 import { JournalWriter } from './journal.js'
 import { RepoManager } from './repo.js'
 import { carToBase64, buildImageEmbed } from './atproto.js'
-import { generateTID } from '../src/shared.js'
+import { generateTID, readCarFile, base64ToBytes, bytesToBase64 } from '../src/shared.js'
+import { generateDidWebDocument } from '../src/did.js'
 
 const CONFIG_PATH = './config.json'
 const JOURNAL_PATH = './journal.ndjson'
@@ -41,14 +42,74 @@ function saveAccountsLocal(accounts) {
 }
 
 /**
+ * Extract --curve from an argument list (default p256). Returns the remaining
+ * positional args plus the validated curve.
+ */
+function takeCurveArg(args, fallback = 'p256') {
+    let curve = fallback
+    const positional = []
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i]
+        if (arg === '--curve') {
+            curve = args[++i]
+        } else if (arg.startsWith('--curve=')) {
+            curve = arg.slice('--curve='.length)
+        } else {
+            positional.push(arg)
+        }
+    }
+    if (curve !== 'p256' && curve !== 'k256') {
+        throw new Error(`Unsupported curve "${curve}" (expected p256 or k256)`)
+    }
+    return { curve, positional }
+}
+
+/**
+ * Generate a keypair for the requested curve, normalized to the config shape.
+ */
+async function generateKeyForCurve(curve) {
+    if (curve === 'p256') return generateKeypairP256()
+    const { privateKey, publicKey } = await generateKeypair()
+    return {
+        curve: 'k256',
+        privateKey,
+        publicKey,
+        publicKeyMultibase: publicKeyToMultibase(publicKey)
+    }
+}
+
+/**
+ * Write the static identity files the Worker serves and self-discovers:
+ * public/.well-known/did.json + public/.well-known/atproto-did.
+ */
+function writeIdentityFiles(did, handle, publicKeyMultibase, pdsEndpoint) {
+    const didDoc = generateDidWebDocument(handle, handle, publicKeyMultibase, did, pdsEndpoint)
+    fs.mkdirSync('./public/.well-known', { recursive: true })
+    fs.writeFileSync('./public/.well-known/did.json', JSON.stringify(didDoc, null, 2))
+    fs.writeFileSync('./public/.well-known/atproto-did', did + '\n')
+    return didDoc
+}
+
+/**
  * Add a publishing account: generate a keypair (kept locally for signing)
  * and print the two static files the account owner must host on their
  * domain (/.well-known/atproto-did + /.well-known/did.json). No registry
  * file is needed — the worker discovers accounts from the journal itself.
  */
-async function accountAdd(handle) {
+async function accountAdd(args) {
+    let curve = 'p256'
+    let handle = null
+    try {
+        const parsed = takeCurveArg(args, 'p256')
+        curve = parsed.curve
+        handle = parsed.positional[0]
+    } catch (e) {
+        console.error(e.message)
+        process.exit(1)
+    }
+
     if (!handle || !handle.includes('.')) {
-        console.error('Usage: node cli/seal.js account add <handle>   # e.g. pub1.example.com')
+        console.error('Usage: node cli/seal.js account add <handle> [--curve p256|k256]   # e.g. pub1.example.com')
         process.exit(1)
     }
 
@@ -63,20 +124,21 @@ async function accountAdd(handle) {
         process.exit(1)
     }
 
-    const { privateKey, publicKey } = await generateKeypair()
-    const publicKeyMultibase = publicKeyToMultibase(publicKey)
+    const key = await generateKeyForCurve(curve)
+    const { privateKey, publicKey, publicKeyMultibase } = key
 
-    const didDoc = buildDidDoc(did, handle, publicKeyMultibase, pdsUrl)
+    const didDoc = generateDidWebDocument(handle, handle, publicKeyMultibase, did, pdsUrl)
 
     // Local config only (signing key); no deployable registry — the worker
     // derives hosted accounts from the journal and keys from well-known.
-    accounts[id] = { handle, did, privateKey, publicKey, publicKeyMultibase }
+    accounts[id] = { handle, did, curve, privateKey, publicKey, publicKeyMultibase }
     saveAccountsLocal(accounts)
 
     console.log('✓ Publishing account created')
     console.log(`  id: ${id}`)
     console.log(`  DID: ${did}`)
     console.log(`  Handle: ${handle}`)
+    console.log(`  Curve: ${curve}`)
     console.log('')
     console.log('请让账号持有者在其域名（无需 DNS 配置，放两个静态文件即可）放置：')
     console.log('')
@@ -93,11 +155,20 @@ async function accountAdd(handle) {
 }
 
 /**
- * Load or create config
+ * Load config and normalize the key fields. Configs written before curves
+ * existed have no `curve` and are treated as k256.
+ * Returns { ...rawConfig, curve, privateKey, publicKey, publicKeyMultibase,
+ *           previousPublicKeys: string[] } or null.
  */
 function loadConfig() {
     if (fs.existsSync(CONFIG_PATH)) {
-        return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'))
+        const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'))
+        const key = normalizeKey(raw)
+        return {
+            ...raw,
+            ...key,
+            previousPublicKeys: Array.isArray(raw.previousPublicKeys) ? raw.previousPublicKeys : []
+        }
     }
     return null
 }
@@ -107,42 +178,53 @@ function saveConfig(config) {
 }
 
 /**
- * Initialize - generate keypair
+ * Initialize - generate keypair (default curve: p256)
  */
-async function init() {
+async function init(args) {
     if (fs.existsSync(CONFIG_PATH)) {
         console.log('Config already exists. Delete config.json to reinitialize.')
         return
     }
 
-    console.log('Generating secp256k1 keypair...')
-    const { privateKey, publicKey } = await generateKeypair()
+    let curve = 'p256'
+    let didArg, handleArg
+    try {
+        const parsed = takeCurveArg(args, 'p256')
+        curve = parsed.curve
+        didArg = parsed.positional[0]
+        handleArg = parsed.positional[1]
+    } catch (e) {
+        console.error(e.message)
+        process.exit(1)
+    }
+
+    console.log(`Generating ${curve} keypair...`)
+    const key = await generateKeyForCurve(curve)
 
     // Prompt for DID and handle
-    const did = process.argv[3] || `did:web:localhost`
-    const handle = process.argv[4] || 'localhost'
+    const did = didArg || `did:web:localhost`
+    const handle = handleArg || 'localhost'
 
     const config = {
         did,
         handle,
-        privateKey,
-        publicKey,
-        publicKeyMultibase: publicKeyToMultibase(publicKey)
+        curve,
+        privateKey: key.privateKey,
+        publicKey: key.publicKey,
+        publicKeyMultibase: key.publicKeyMultibase
     }
 
     saveConfig(config)
 
     // Write the static identity files the Worker serves and self-discovers
     // (no env vars needed): /.well-known/did.json + /.well-known/atproto-did
-    const didDoc = buildDidDoc(config.did, config.handle, config.publicKeyMultibase)
-    fs.mkdirSync('./public/.well-known', { recursive: true })
-    fs.writeFileSync('./public/.well-known/did.json', JSON.stringify(didDoc, null, 2))
-    fs.writeFileSync('./public/.well-known/atproto-did', config.did + '\n')
+    writeIdentityFiles(config.did, config.handle, config.publicKeyMultibase)
 
     console.log('✓ Keypair generated')
     console.log(`  DID: ${did}`)
     console.log(`  Handle: ${handle}`)
-    console.log(`  Public Key: ${publicKey.slice(0, 16)}...`)
+    console.log(`  Curve: ${curve}`)
+    console.log(`  Public Key: ${key.publicKey.slice(0, 16)}...`)
     console.log(`  Multibase: ${config.publicKeyMultibase.slice(0, 20)}...`)
     console.log('')
     console.log('✓ 身份文件已生成（公钥自发现，无需环境变量）：')
@@ -154,60 +236,290 @@ async function init() {
 }
 
 /**
- * Build a did:web DID document (verificationMethod + atproto_pds service).
+ * Rotate key - generate a new keypair, back up the old config, and rewrite
+ * the identity files. Does NOT append a journal event and does NOT deploy:
+ * the next real write with the new key completes the rotation.
  */
-function buildDidDoc(did, handle, publicKeyMultibase, pdsUrl) {
-    return {
-        '@context': [
-            'https://www.w3.org/ns/did/v1',
-            'https://w3id.org/security/multikey/multikey-v1.jsonld',
-            'https://w3id.org/security/suites/secp256k1-2019/v1'
-        ],
-        id: did,
-        alsoKnownAs: [`at://${handle}`],
-        verificationMethod: [{
-            id: `${did}#atproto`,
-            type: 'Multikey',
-            controller: did,
-            publicKeyMultibase
-        }],
-        service: [{
-            id: '#atproto_pds',
-            type: 'AtprotoPersonalDataServer',
-            serviceEndpoint: pdsUrl || `https://${handle}`
-        }]
-    }
-}
-
-/**
- * Rotate key - generate a new keypair
- */
-async function rotateKey() {
+async function rotateKey(args) {
     const config = loadConfig()
     if (!config) {
-        console.error('Not initialized. Run: node cli/sign.js init')
+        console.error('Not initialized. Run: node cli/seal.js init')
         process.exit(1)
     }
 
-    console.log('Rotating secp256k1 keypair...')
-    const { privateKey, publicKey } = await generateKeypair()
+    let curve = config.curve || 'k256'
+    try {
+        // Default to the account's current curve; use --curve to migrate.
+        curve = takeCurveArg(args, curve).curve
+    } catch (e) {
+        console.error(e.message)
+        process.exit(1)
+    }
 
-    config.privateKey = privateKey
-    config.publicKey = publicKey
-    config.publicKeyMultibase = publicKeyToMultibase(publicKey)
+    console.log(`Rotating ${config.curve || 'k256'} key to ${curve}...`)
 
-    saveConfig(config)
+    // Back up the current config (contains the old private key) before
+    // overwriting it. config.json.bak is gitignored.
+    fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak')
+
+    const key = await generateKeyForCurve(curve)
+
+    const previousPublicKeys = Array.isArray(config.previousPublicKeys)
+        ? [...config.previousPublicKeys]
+        : []
+    if (config.publicKeyMultibase && !previousPublicKeys.includes(config.publicKeyMultibase)) {
+        previousPublicKeys.push(config.publicKeyMultibase)
+    }
+
+    const updated = {
+        ...config,
+        curve,
+        privateKey: key.privateKey,
+        publicKey: key.publicKey,
+        publicKeyMultibase: key.publicKeyMultibase,
+        previousPublicKeys
+    }
+    // Don't persist the normalized `previousPublicKeys: []` default twice etc.
+    saveConfig(updated)
+
+    // Regenerate the served identity files with the new key. The DID and
+    // handle are preserved.
+    writeIdentityFiles(updated.did, updated.handle, updated.publicKeyMultibase)
 
     console.log('✓ Keypair rotated')
-    console.log(`  New Public Key: ${publicKey.slice(0, 16)}...`)
-    console.log(`  New Multibase: ${config.publicKeyMultibase}`)
+    console.log(`  Curve: ${curve}`)
+    console.log(`  Old Multibase: ${config.publicKeyMultibase}`)
+    console.log(`  New Multibase: ${updated.publicKeyMultibase}`)
     console.log('')
-    console.log('Config updated in config.json (local only)')
+    console.log(`✓ Config backed up to ${CONFIG_PATH}.bak (gitignored)`)
+    console.log('✓ public/.well-known/did.json regenerated with the new key')
     console.log('')
-    console.log('Next steps for deployment:')
-    console.log(`  # Update OWNER_PUBLIC_KEY in wrangler.toml [vars]:`)
-    console.log(`  OWNER_PUBLIC_KEY = "${config.publicKeyMultibase}"`)
-    console.log('  # Then redeploy: npm run deploy')
+    console.log('IMPORTANT:')
+    console.log('  1. Publish/deploy public/.well-known/did.json NOW (npm run deploy),')
+    console.log('     before the next write. Relays/appviews cache the old key briefly.')
+    console.log('  2. The next write signed with the new key completes the rotation;')
+    console.log('     no journal event is appended by this command.')
+}
+
+/**
+ * Re-sign the current repo head with the current key without changing any
+ * record content. Used to complete a key rotation (did.json already points at
+ * the new key, but the head commit is still signed with the old one).
+ *
+ * It performs an `update` of the latest record with identical content, so the
+ * MST root is unchanged and the firehose diff is empty. The new head is a
+ * normal commit signed by the new key.
+ */
+async function rotateHead() {
+    const config = loadConfig()
+    if (!config) {
+        console.error('Not initialized. Run: node cli/seal.js init')
+        process.exit(1)
+    }
+
+    const all = new JournalWriter(JOURNAL_PATH).readAll()
+    const latest = [...all].reverse().find(e =>
+        e.did === config.did && e.op !== 'delete' && e.record && e.collection && e.rkey
+    )
+    if (!latest) {
+        console.error('No existing record to re-sign. Run a normal write (e.g. post) first.')
+        process.exit(1)
+    }
+
+    const repo = new RepoManager(config.did, config, STATE_PATH)
+    const result = await repo.applyWrite({
+        action: 'update',
+        collection: latest.collection,
+        rkey: latest.rkey,
+        record: latest.record
+    })
+
+    // Include the full blockstore: the MST root/record blocks may be unchanged
+    // (so applyWrite returns no new MST blocks), but the Worker append check
+    // requires them to be present in the CAR.
+    const blocks = new Map(repo.blockstore)
+    const car = await repo.buildCar(result.commitCid, blocks)
+
+    const event = await new JournalWriter(JOURNAL_PATH, config.did).append({
+        op: 'update',
+        collection: latest.collection,
+        rkey: latest.rkey,
+        record: latest.record,
+        did: config.did,
+        rev: result.rev,
+        recordCid: result.recordCid,
+        commit: result.commit,
+        commitCid: result.commitCid,
+        mstRoot: result.mstRoot,
+        prevMstRoot: result.prevMstRoot,
+        blocksB64: carToBase64(car),
+        signingKey: config.publicKeyMultibase
+    })
+
+    console.log('✓ Head re-signed (no content change)')
+    console.log(`  Curve: ${config.curve}`)
+    console.log(`  URI: at://${config.did}/${latest.collection}/${latest.rkey}`)
+    console.log(`  Commit CID: ${result.commitCid}`)
+    console.log(`  Rev: ${result.rev}`)
+    console.log(`  Offset: ${event.offset}`)
+}
+
+// ============ Remote ledger sync (push / pull) ============
+
+function parseRemoteArgs(args) {
+    let remote = process.env.ATPROTO_WORKER_URL || null
+    let accountId = null
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--remote') remote = args[++i]
+        else if (args[i] === '--account') accountId = args[++i]
+    }
+    return { remote, accountId }
+}
+
+function resolveAccount(accountId) {
+    if (accountId) {
+        const acct = loadAccountsLocal()[accountId]
+        if (!acct) {
+            console.error(`Account "${accountId}" not found.`)
+            process.exit(1)
+        }
+        return {
+            did: acct.did,
+            handle: acct.handle,
+            key: normalizeKey(acct),
+            statePath: `./.repo-state-${accountId}.json`
+        }
+    }
+    const config = loadConfig()
+    if (!config) {
+        console.error('Not initialized. Run: node cli/seal.js init')
+        process.exit(1)
+    }
+    return { did: config.did, handle: config.handle, key: config, statePath: STATE_PATH }
+}
+
+function defaultRemote(handle) {
+    if (!handle) return null
+    return handle.startsWith('localhost') || handle.startsWith('127.0.0.1')
+        ? `http://${handle}`
+        : `https://${handle}`
+}
+
+async function fetchRemoteSnapshot(remote) {
+    const resp = await fetch(`${remote.replace(/\/$/, '')}/xrpc/com.atproto.worker.snapshot`, {
+        headers: { 'Accept': 'application/x-ndjson' }
+    })
+    if (!resp.ok) {
+        throw new Error(`snapshot failed: HTTP ${resp.status} ${await resp.text().catch(() => '')}`)
+    }
+    const text = (await resp.text()).trim()
+    return text ? text.split('\n').map(line => JSON.parse(line)) : []
+}
+
+function rebuildRepoState(events, did, statePath) {
+    const blocks = new Map()
+    for (const event of events) {
+        if (event.did !== did || !event.blocksB64) continue
+        const car = readCarFile(base64ToBytes(event.blocksB64))
+        for (const [cid, bytes] of car.blocks) blocks.set(cid, bytes)
+    }
+    const last = [...events].reverse().find(e => e.did === did && (e.commitCid || e.cid))
+    if (!last) {
+        console.warn(`  No events for ${did}; local repo state left untouched.`)
+        return
+    }
+    const state = {
+        mstRoot: last.commit?.data || last.mstRoot || null,
+        commitCid: last.commitCid || last.cid || null,
+        rev: last.rev || null,
+        blocks: Object.fromEntries([...blocks].map(([cid, bytes]) => [cid, bytesToBase64(bytes)]))
+    }
+    fs.writeFileSync(statePath, JSON.stringify(state))
+    console.log(`  Rebuilt ${statePath} (head ${state.commitCid}, rev ${state.rev})`)
+}
+
+/**
+ * Push local journal events that the remote ledger does not have yet.
+ * The events are already signed; this never re-signs.
+ */
+async function push(args) {
+    const { remote: remoteArg, accountId } = parseRemoteArgs(args)
+    const account = resolveAccount(accountId)
+    const remote = (remoteArg || defaultRemote(account.handle))
+    if (!remote) {
+        console.error('No remote URL. Pass --remote https://your-worker or set ATPROTO_WORKER_URL.')
+        process.exit(1)
+    }
+
+    const all = new JournalWriter(JOURNAL_PATH).readAll()
+    const local = all.filter(e => e.did === account.did)
+    const remoteEvents = await fetchRemoteSnapshot(remote)
+    const remoteCids = new Set(
+        remoteEvents.filter(e => e.did === account.did).map(e => e.commitCid || e.cid)
+    )
+    const missing = local.filter(e => {
+        const cid = e.commitCid || e.cid
+        return cid && !remoteCids.has(cid)
+    })
+
+    console.log(`Remote: ${remote}`)
+    console.log(`Local events: ${local.length}, already remote: ${local.length - missing.length}, to push: ${missing.length}`)
+
+    if (missing.length === 0) {
+        console.log('✓ Already in sync')
+        return
+    }
+
+    for (const event of missing) {
+        if (!event.signingKey) {
+            console.error(`  ✗ ${event.commitCid || event.cid}: missing signingKey (pre-v2 event not in the remote seed); cannot push`)
+            process.exit(1)
+        }
+        const resp = await fetch(`${remote.replace(/\/$/, '')}/xrpc/com.atproto.worker.appendEvent`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ event })
+        })
+        const body = await resp.json().catch(() => ({}))
+        if (resp.status === 409) {
+            console.error('  ✗ 409 RepoConflict: the remote head moved. Run `node cli/seal.js pull` first, then retry.')
+            console.error('    remote head:', body.head || body.details?.head || '(unknown)')
+            process.exit(1)
+        }
+        if (!resp.ok) {
+            console.error(`  ✗ ${event.commitCid || event.cid}: ${resp.status} ${body.error || ''} ${body.message || ''}`)
+            process.exit(1)
+        }
+        console.log(`  ✓ pushed ${event.commitCid || event.cid} (seq ${body.seq})`)
+    }
+    console.log('✓ Push complete')
+}
+
+/**
+ * Pull the live ledger into local journal/public/journal.ndjson and rebuild
+ * the local repo state so the next CLI write is based on the current head.
+ */
+async function pull(args) {
+    const { remote: remoteArg, accountId } = parseRemoteArgs(args)
+    const account = resolveAccount(accountId)
+    const remote = (remoteArg || defaultRemote(account.handle))
+    if (!remote) {
+        console.error('No remote URL. Pass --remote https://your-worker or set ATPROTO_WORKER_URL.')
+        process.exit(1)
+    }
+
+    const events = await fetchRemoteSnapshot(remote)
+    if (events.length === 0) {
+        console.log('Remote ledger is empty (or only the static seed is available); nothing to pull.')
+        return
+    }
+
+    const ndjson = events.map(e => JSON.stringify(e)).join('\n') + '\n'
+    fs.writeFileSync(JOURNAL_PATH, ndjson)
+    fs.mkdirSync('./public', { recursive: true })
+    fs.writeFileSync('./public/journal.ndjson', ndjson)
+    console.log(`✓ Pulled ${events.length} events into ${JOURNAL_PATH} and public/journal.ndjson`)
+    rebuildRepoState(events, account.did, account.statePath)
 }
 
 /**
@@ -222,7 +534,7 @@ async function createPost(text, options = {}) {
     let statePath = STATE_PATH
     let uploadsDir = UPLOADS_DIR
     let did
-    let privateKey
+    let key
     if (options.accountId) {
         const accounts = loadAccountsLocal()
         const acct = accounts[options.accountId]
@@ -231,19 +543,19 @@ async function createPost(text, options = {}) {
             process.exit(1)
         }
         did = acct.did
-        privateKey = acct.privateKey
+        key = normalizeKey(acct)
         statePath = `./.repo-state-${options.accountId}.json`
         uploadsDir = path.join(UPLOADS_DIR, options.accountId)
     } else {
         if (!config) {
-            console.error('Not initialized. Run: node cli/sign.js init')
+            console.error('Not initialized. Run: node cli/seal.js init')
             process.exit(1)
         }
         did = config.did
-        privateKey = config.privateKey
+        key = config
     }
 
-    const repo = new RepoManager(did, privateKey, statePath)
+    const repo = new RepoManager(did, key, statePath)
     const journal = new JournalWriter(JOURNAL_PATH, did)
     const rkey = generateTID()
 
@@ -291,7 +603,8 @@ async function createPost(text, options = {}) {
         commitCid: result.commitCid,
         mstRoot: result.mstRoot,
         prevMstRoot: result.prevMstRoot,
-        blocksB64: carB64
+        blocksB64: carB64,
+        signingKey: key.publicKeyMultibase
     })
 
     console.log('✓ Post created')
@@ -308,7 +621,7 @@ async function createPost(text, options = {}) {
 async function createLike(subjectUri, subjectCid) {
     const config = loadConfig()
     if (!config) {
-        console.error('Not initialized. Run: node cli/sign.js init')
+        console.error('Not initialized. Run: node cli/seal.js init')
         process.exit(1)
     }
 
@@ -325,7 +638,8 @@ async function createLike(subjectUri, subjectCid) {
         process.exit(1)
     }
 
-    const repo = new RepoManager(config.did, config.privateKey, STATE_PATH)
+    const key = config
+    const repo = new RepoManager(config.did, key, STATE_PATH)
     const journal = new JournalWriter(JOURNAL_PATH)
     const rkey = generateTID()
 
@@ -358,7 +672,8 @@ async function createLike(subjectUri, subjectCid) {
         commitCid: result.commitCid,
         mstRoot: result.mstRoot,
         prevMstRoot: result.prevMstRoot,
-        blocksB64: carB64
+        blocksB64: carB64,
+        signingKey: key.publicKeyMultibase
     })
 
     console.log('✓ Like created')
@@ -373,7 +688,7 @@ async function createLike(subjectUri, subjectCid) {
 async function createRepost(subjectUri, subjectCid) {
     const config = loadConfig()
     if (!config) {
-        console.error('Not initialized. Run: node cli/sign.js init')
+        console.error('Not initialized. Run: node cli/seal.js init')
         process.exit(1)
     }
 
@@ -390,7 +705,8 @@ async function createRepost(subjectUri, subjectCid) {
         process.exit(1)
     }
 
-    const repo = new RepoManager(config.did, config.privateKey, STATE_PATH)
+    const key = config
+    const repo = new RepoManager(config.did, key, STATE_PATH)
     const journal = new JournalWriter(JOURNAL_PATH)
     const rkey = generateTID()
 
@@ -423,7 +739,8 @@ async function createRepost(subjectUri, subjectCid) {
         commitCid: result.commitCid,
         mstRoot: result.mstRoot,
         prevMstRoot: result.prevMstRoot,
-        blocksB64: carB64
+        blocksB64: carB64,
+        signingKey: key.publicKeyMultibase
     })
 
     console.log('✓ Repost created')
@@ -438,11 +755,12 @@ async function createRepost(subjectUri, subjectCid) {
 async function createFollow(subjectDid) {
     const config = loadConfig()
     if (!config) {
-        console.error('Not initialized. Run: node cli/sign.js init')
+        console.error('Not initialized. Run: node cli/seal.js init')
         process.exit(1)
     }
 
-    const repo = new RepoManager(config.did, config.privateKey, STATE_PATH)
+    const key = config
+    const repo = new RepoManager(config.did, key, STATE_PATH)
     const journal = new JournalWriter(JOURNAL_PATH)
     const rkey = generateTID()
 
@@ -472,7 +790,8 @@ async function createFollow(subjectDid) {
         commitCid: result.commitCid,
         mstRoot: result.mstRoot,
         prevMstRoot: result.prevMstRoot,
-        blocksB64: carB64
+        blocksB64: carB64,
+        signingKey: key.publicKeyMultibase
     })
 
     console.log('✓ Follow created')
@@ -489,34 +808,79 @@ async function validate() {
 
     try {
         const events = journal.readAll()
-        const { verifyCommitSig, recordCid } = await import('./atproto.js')
+        const { verifyCommitSig, verifyCommitSigWithMultikey, recordCid } = await import('./atproto.js')
 
         // Chain integrity
         const chainResult = await journal.validate()
         let sigErrors = 0
+        let warnings = 0
+        let verified = 0
 
-        // Commit signature + record CID verification (new format).
-        // Each account's commits verify against ITS OWN public key.
+        // Per-event signature verification:
+        // - event.signingKey (schema v2) is authoritative for that event;
+        // - otherwise try the account's current key + previousPublicKeys.
+        // Events that cannot be checked (e.g. history signed by a key we no
+        // longer have) produce a warning, not a hard failure.
         const accounts = loadAccountsLocal()
         const keyForDid = (did) => {
-            if (did === config.did) return config.publicKey
+            if (config && did === config.did) {
+                return { current: config, previous: config.previousPublicKeys || [] }
+            }
             const acct = Object.values(accounts).find(a => a.did === did)
-            return acct ? acct.publicKey : null
+            if (!acct) return null
+            return {
+                current: normalizeKey(acct),
+                previous: Array.isArray(acct.previousPublicKeys) ? acct.previousPublicKeys : []
+            }
         }
+
         for (const event of events) {
-            if (event.commitCid) {
-                const pubKey = keyForDid(event.did)
-                const sigOk = pubKey ? await verifyCommitSig(event.commit, pubKey) : false
+            if (!event.commitCid) continue
+
+            let sigOk = false
+            let checked = false
+            let sigError = null
+
+            if (event.signingKey) {
+                checked = true
+                try {
+                    sigOk = await verifyCommitSigWithMultikey(event.commit, event.signingKey)
+                } catch (e) {
+                    sigError = e
+                }
                 if (!sigOk) {
                     sigErrors++
-                    console.error(`  ✗ Commit signature invalid at offset ${event.offset}`)
+                    console.error(`  ✗ Commit signature invalid at offset ${event.offset} (signingKey ${String(event.signingKey).slice(0, 12)}...)${sigError ? ': ' + sigError.message : ''}`)
                 }
-                if (event.recordCid && event.record) {
-                    const expected = await recordCid(event.record)
-                    if (event.recordCid !== expected) {
-                        sigErrors++
-                        console.error(`  ✗ Record CID mismatch at offset ${event.offset}`)
+            } else {
+                const entry = keyForDid(event.did)
+                if (entry) {
+                    for (const candidate of [entry.current, ...entry.previous]) {
+                        if (!candidate) continue
+                        checked = true
+                        try {
+                            sigOk = typeof candidate === 'string'
+                                ? await verifyCommitSigWithMultikey(event.commit, candidate)
+                                : await verifyCommitSig(event.commit, candidate)
+                        } catch {
+                            sigOk = false
+                        }
+                        if (sigOk) break
                     }
+                }
+                if (!sigOk) {
+                    warnings++
+                    console.warn(`  ⚠ Cannot verify commit signature at offset ${event.offset} (${checked ? 'no current/previous key matched' : 'no key available'}) — legacy event left unverified`)
+                }
+            }
+
+            if (sigOk) verified++
+
+            if (event.recordCid && event.record) {
+                const expected = await recordCid(event.record)
+                if (event.recordCid !== expected) {
+                    sigErrors++
+                    console.error(`  ✗ Record CID mismatch at offset ${event.offset}`)
                 }
             }
         }
@@ -527,7 +891,10 @@ async function validate() {
 
         console.log('✓ Journal is valid')
         console.log(`  Events: ${chainResult.eventCount}`)
-        console.log(`  Commits verified: ${events.filter(e => e.commitCid).length}`)
+        console.log(`  Commits verified: ${verified}/${events.filter(e => e.commitCid).length}`)
+        if (warnings > 0) {
+            console.log(`  Warnings: ${warnings} legacy commit(s) could not be verified (no matching key)`)
+        }
     } catch (e) {
         console.error('✗ Journal validation failed:', e.message)
         process.exit(1)
@@ -584,14 +951,23 @@ const command = process.argv[2]
 
 switch (command) {
     case 'init':
-        init()
+        init(process.argv.slice(3))
         break
     case 'rotate-key':
-        rotateKey()
+        rotateKey(process.argv.slice(3))
+        break
+    case 'rotate-head':
+        rotateHead()
+        break
+    case 'push':
+        push(process.argv.slice(3))
+        break
+    case 'pull':
+        pull(process.argv.slice(3))
         break
     case 'account':
-        if (process.argv[3] === 'add') accountAdd(process.argv[4])
-        else console.error('Usage: node cli/seal.js account add <handle>')
+        if (process.argv[3] === 'add') accountAdd(process.argv.slice(4))
+        else console.error('Usage: node cli/seal.js account add <handle> [--curve p256|k256]')
         break
     case 'post': {
         const { text, images, accountId } = parsePostArgs(process.argv.slice(3))
@@ -618,9 +994,12 @@ switch (command) {
 ATProto Signing CLI
 
 Usage:
-  node cli/seal.js init [did] [handle]   Initialize with keypair
-  node cli/seal.js rotate-key            Generate a new keypair
-  node cli/seal.js account add <handle>  注册发布账号（输出 did.json + TXT 粘贴内容）
+  node cli/seal.js init [did] [handle] [--curve p256|k256]   Initialize (default curve: p256)
+  node cli/seal.js rotate-key [--curve p256|k256]            Rotate key + rewrite did.json (no journal write)
+  node cli/seal.js rotate-head                               Re-sign the current head with the current key (no content change)
+  node cli/seal.js push [--remote URL] [--account id]        Push local signed events missing from the remote ledger
+  node cli/seal.js pull [--remote URL] [--account id]        Pull the live ledger + rebuild local repo state
+  node cli/seal.js account add <handle> [--curve p256|k256]  注册发布账号（输出 did.json + TXT 粘贴内容）
   node cli/seal.js post "text" [--image path.jpg] [--alt "描述"] [--account <id>]  发帖（最多 4 图；--account 用发布账号）
   node cli/seal.js like <at-uri> <cid>   Like a post (requires subject CID)
   node cli/seal.js repost <at-uri> <cid> Repost (requires subject CID)

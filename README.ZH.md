@@ -1,6 +1,15 @@
 # atproto-worker
 
-无状态的 AT Protocol 发布器，运行在 Cloudflare Workers 上。Journal 是一个签名的 append-only 日志（`journal.ndjson`），Worker 通过标准 atproto 端点对外发布。无数据库，无持久状态。
+AT Protocol 发布器 / 轻量 PDS，运行在 Cloudflare Workers 上。历史上是完全静态的 append-only journal；**2026-11 M1 之后**，运行时写入走 Firehose DO 的 SQLite 活账本，静态 `journal.ndjson` 降级为 seed/备份。owner 用 CLI 或浏览器里的 P-256 私钥签名，Worker 永不持有私钥。
+
+## M1：owner 自签 P-256 + 活账本（2026-11）
+
+- **新账号默认 P-256**（`init --curve p256`）；现有 K-256 账号用 `rotate-key --curve p256` + `rotate-head` 轮换，历史不需要重签（协议只验 head commit）。
+- **浏览器 owner console**：`/app/`，P-256 私钥只在浏览器（口令加密存储），读 `getRepo`、写 `appendEvent`；也可独立静态托管。
+- **Worker 活账本**：Firehose DO SQLite（`events`/`heads`/`meta`），`POST /xrpc/com.atproto.worker.appendEvent` 验签 + head CAS + 广播；`GET /xrpc/com.atproto.worker.snapshot` 导出 NDJSON。
+- **CLI**：`push`/`pull` 同步本地与活账本；`rotate-head` 用新钥重签当前 head（不改内容）。
+- 决策：`docs/ADR/040.arch.owner-signed-p256-repo.md`；完整设计：`docs/phase6.md`。
+- 规则：**ledger 上线后，运行时写入走 append；静态 journal 只做 seed/备份**。官方 bsky.app 仍需要完整 PDS 写路径（M3）。
 
 ## 架构
 
@@ -20,9 +29,9 @@
                         └───────────────────────┘
 ```
 
-发帖流程：`seal.js post` 本地签名并追加到 `journal.ndjson` → 复制到
-`public/journal.ndjson` → 部署。Worker 通过 XRPC 提供读取、通过 firehose
-广播。无数据库、无持久状态、无需外部静态托管。
+发帖流程（M1）：浏览器或 CLI 本地构造并签名 commit → POST `appendEvent` →
+Firehose DO 活账本存储并广播。静态 `journal.ndjson` 是新部署的 seed/备份。
+私钥永不进入 Worker。
 
 ## 快速开始
 
@@ -38,7 +47,7 @@ npm install
 node cli/seal.js init did:web:yourdomain.com yourdomain.com
 ```
 
-生成 secp256k1 密钥对，保存到 `config.json`（仅本地使用，已 gitignore）。
+生成 P-256 密钥对（`--curve k256` 可显式选旧曲线），保存到 `config.json`（仅本地使用，已 gitignore）。
 
 ### 2. 创建内容
 
@@ -135,21 +144,34 @@ curl https://你的-worker.子域名.workers.dev/refresh
 | `/xrpc/com.atproto.sync.listRepos` | 列出 repos |
 | `/xrpc/com.atproto.server.describeServer` | 服务器描述 |
 | `/xrpc/com.atproto.identity.resolveHandle` | Handle 解析为 DID |
+| `/xrpc/com.atproto.worker.appendEvent` | **owner 签名写入**（P-256 验签 + head CAS） |
+| `/xrpc/com.atproto.worker.snapshot` | 导出活账本 NDJSON（`?after=&limit=`） |
 | `/xrpc/_health` | 健康检查 |
-| `/refresh` | 从 Worker 自身静态资源重新加载 journal |
-| `/journal.ndjson` | journal 静态资源本身 |
+| `/refresh` | seed/刷新并广播 + `requestCrawl` |
+| `/journal.ndjson` | 静态 seed/备份（fresh deploy 时导入活账本） |
+| `/app/` | 静态 owner console（浏览器 P-256 签名） |
 
 ## CLI 命令
 
 ```bash
-node cli/seal.js init [did] [handle]     # 生成密钥对
-node cli/seal.js rotate-key              # 轮换密钥
-node cli/seal.js post "text"             # 发帖
-node cli/seal.js like <at-uri> <cid>     # 点赞
-node cli/seal.js repost <at-uri> <cid>   # 转发
-node cli/seal.js follow <did>            # 关注
-node cli/seal.js validate                # 验证 journal 完整性
-node cli/seal.js list                    # 列出所有记录
+node cli/seal.js init [did] [handle] [--curve p256|k256]   # 生成密钥对（默认 p256）
+node cli/seal.js rotate-key [--curve p256|k256]            # 轮换密钥 + 重写 did.json
+node cli/seal.js rotate-head                               # 用新钥重签当前 head（不改内容）
+node cli/seal.js post "text"                               # 发帖（本地签名、追加 journal）
+node cli/seal.js like <at-uri> <cid>                       # 点赞
+node cli/seal.js repost <at-uri> <cid>                     # 转发
+node cli/seal.js follow <did>                              # 关注
+node cli/seal.js validate                                  # 验证 journal（按事件 signingKey/previousPublicKeys）
+node cli/seal.js list                                      # 列出所有记录
+node cli/seal.js push [--remote URL] [--account id]        # 把本地已签事件推到活账本
+node cli/seal.js pull [--remote URL] [--account id]        # 拉活账本 + 重建 .repo-state
+```
+
+Web UI 构建与测试：
+
+```bash
+npm run build:app   # esbuild -> public/app/app.js
+npm run test:ui     # Playwright + Edge 冒烟测试
 ```
 
 ## 身份模型
@@ -164,20 +186,24 @@ node cli/seal.js list                    # 列出所有记录
 - `config.json` 包含私钥 — 绝不提交到 git
 - 根目录的 `journal.ndjson`（本地工作副本）已 gitignore；`public/journal.ndjson`
   中的签名事件可安全提交（Worker 加载时会验证签名）
-- Worker 不持有也不使用私钥（签名仅在 CLI 完成）
-- Journal 加载时验证链完整性（CID 和 prev 链）
-- 私钥使用 secp256k1 (k256)，与 atproto 默认一致
+- Worker 不持有也不使用私钥（签名在 CLI 或浏览器完成）
+- 读路径验证链完整性（CID 和 prev 链），**不验签**（ADR-030 信任边界）
+- `appendEvent` 写路径**必须验 P-256 签名 + low-S + head/CAR**（ADR-040）
+- 新账号默认 P-256（WebCrypto 原生）；K-256 旧事件只读兼容
+- 浏览器 key 用 PBKDF2 + AES-GCM 口令加密存 localStorage；页面的 CSP/独立托管建议见 `docs/phase6.md` §6.8
 
 ## 已知限制
 
-- **Firehose**：`#commit` 事件的 `blocks` 为空 — 需要完整 CAR 数据的消费者无法使用
-- **Interactions**：Cron 抓取 likes/reposts 但仅记录日志，未持久化
-- **写操作**：XRPC 写端点返回 501 — 使用 CLI 进行所有写操作
-- **Journal 必须 append-only**：Refresh 假设事件只追加、不重排
+- **不是完整 PDS**：官方 bsky.app 仍不能登录发帖；需要 M3（Worker 持 repo key + sessions/JWT + 服务端签名）
+- **Blobs**：浏览器上传图片/头像尚未实现（现有静态 blob 发布仍可用）
+- **完整 MST 路径验证**：append 只校验 root/CAR 存在性，未证明 record leaf 可达
+- **限流/自注册**：append 目前只允许已 hosted 的 DID，无 per-DID 写限流
+- **轮换重放边界**：relay 若从 -1 重放旧 K-256 事件，可能因当前 did.json 已是 P-256 而验签失败（正常 cursor 不会）
+- 静态 journal 只做 seed/备份；ledger 上线后不要再用"本地 append + deploy"作为运行时写路径
 
 ## 项目状态
 
-可用原型。核心读路径（XRPC、firehose、DID 文档）和写路径（CLI 签名、journal 追加）均已实现。测试通过，包括 atproto 互操作测试（CID/CBOR 编码、handle/DID 语法）。
+M1 可用：读路径（XRPC、firehose、DID 文档）、写路径（CLI/浏览器 P-256 签名 + DO 活账本）、静态 UI、CLI push/pull 均已实现。`npm test` 与 `npm run test:ui` 通过；官方 `@atproto/repo.verifyRepoCar` 对 P-256 commit/CAR 验证通过。主账号已轮换到 P-256，待 `wrangler login` 后部署。
 
 ## 许可证
 

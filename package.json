@@ -7,10 +7,12 @@
     "dev": "wrangler dev",
     "dev:local": "wrangler dev --var JOURNAL_CONTENT:\"$(cat journal.ndjson 2>/dev/null)\"",
     "deploy": "wrangler deploy",
+    "build:app": "sh app/build.sh",
+    "test:ui": "node tests/ui-smoke.test.js",
     "seal": "node cli/seal.js",
     "seal:init": "node cli/seal.js init",
     "seal:post": "node cli/seal.js post",
-    "test": "node tests/crypto.test.js && node tests/journal.test.js && node tests/interop.test.js && node tests/mst.test.js && node tests/mst-atcute.test.js && node tests/firehose.test.js && node tests/blob.test.js && node tests/multi-account.test.js && node tests/e2e.test.js"
+    "test": "node tests/crypto.test.js && node tests/p256.test.js && node tests/journal.test.js && node tests/interop.test.js && node tests/mst.test.js && node tests/mst-atcute.test.js && node tests/repo-core.test.js && node tests/car.test.js && node tests/append.test.js && node tests/ledger.test.js && node tests/firehose.test.js && node tests/blob.test.js && node tests/multi-account.test.js && node tests/e2e.test.js"
   },
   "devDependencies": {
     "@atcute/mst": "^1.0.3",

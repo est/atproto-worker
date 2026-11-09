@@ -3,6 +3,7 @@
  */
 
 import { isValidDID, isValidHandle } from './utils.js'
+import { parseMultikey } from './keys.js'
 
 export { isValidDID as validateDid } from './utils.js'
 
@@ -22,18 +23,37 @@ export function handleAtprotoDid(did) {
  * Generate a did:web document for the host
  * @param {string} host - The hostname (e.g., "pds.example.com")
  * @param {string} handle - The handle (e.g., "alice.example.com") 
- * @param {string} publicKeyMultibase - The public key multibase string
+ * @param {string} publicKeyMultibase - The public key Multikey (zDna.../zQ3...)
  * @param {string} [did] - Override DID (defaults to did:web:{host})
+ * @param {string} [pdsEndpoint] - atproto_pds endpoint (defaults to https://{host})
  */
-export function generateDidWebDocument(host, handle, publicKeyMultibase, did) {
+export function generateDidWebDocument(host, handle, publicKeyMultibase, did, pdsEndpoint) {
     did = did || `did:web:${host}`
 
+    if (!publicKeyMultibase) {
+        // Never invent/fallback to a hardcoded key: serving the wrong key
+        // silently breaks verification for consumers.
+        throw new Error('publicKeyMultibase is required to build a DID document')
+    }
+
+    // The secp256k1-2019 context is only valid for k256 keys. P-256 keys
+    // (and any other curve) use the Multikey context alone.
+    const contexts = [
+        'https://www.w3.org/ns/did/v1',
+        'https://w3id.org/security/multikey/multikey-v1.jsonld'
+    ]
+    let curve = null
+    try {
+        curve = parseMultikey(publicKeyMultibase).curve
+    } catch {
+        // Leave curve null: do not advertise a suite we cannot confirm.
+    }
+    if (curve === 'k256') {
+        contexts.push('https://w3id.org/security/suites/secp256k1-2019/v1')
+    }
+
     return {
-        '@context': [
-            'https://www.w3.org/ns/did/v1',
-            'https://w3id.org/security/multikey/multikey-v1.jsonld',
-            'https://w3id.org/security/suites/secp256k1-2019/v1'
-        ],
+        '@context': contexts,
         id: did,
         alsoKnownAs: [`at://${handle}`],
         verificationMethod: [
@@ -41,14 +61,14 @@ export function generateDidWebDocument(host, handle, publicKeyMultibase, did) {
                 id: `${did}#atproto`,
                 type: 'Multikey',
                 controller: did,
-                publicKeyMultibase: publicKeyMultibase || 'zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF'
+                publicKeyMultibase
             }
         ],
         service: [
             {
                 id: '#atproto_pds',
                 type: 'AtprotoPersonalDataServer',
-                serviceEndpoint: `https://${host}`
+                serviceEndpoint: pdsEndpoint || `https://${host}`
             }
         ]
     }

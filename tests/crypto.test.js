@@ -1,6 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert'
-import { generateKeypair, sign, verify, computeCID, cborEncode } from '../cli/crypto.js'
+import {
+    generateKeypair,
+    generateKeypairP256,
+    sign,
+    verify,
+    publicKeyToMultibase,
+    normalizeKey,
+    computeCID,
+    cborEncode
+} from '../cli/crypto.js'
 
 test('crypto - keypair generation', async () => {
     const { privateKey, publicKey } = await generateKeypair()
@@ -46,4 +55,21 @@ test('crypto - cbor canonical encoding', async () => {
 
     // Objects should be sorted by key (canonical CBOR)
     assert.deepStrictEqual(cbor1, cbor2)
+})
+
+test('crypto - multikey prefixes and curve defaults', async () => {
+    const k256 = await generateKeypair()
+    // Backwards-compatible single-argument call stays k256.
+    assert.ok(publicKeyToMultibase(k256.publicKey).startsWith('zQ3'))
+    assert.strictEqual(
+        publicKeyToMultibase(k256.publicKey),
+        publicKeyToMultibase(k256.publicKey, 'k256')
+    )
+    assert.strictEqual(normalizeKey(k256).curve, 'k256')
+
+    const p256 = await generateKeypairP256()
+    assert.strictEqual(p256.curve, 'p256')
+    assert.ok(p256.publicKeyMultibase.startsWith('zDna'))
+    assert.strictEqual(publicKeyToMultibase(p256.publicKey, 'p256'), p256.publicKeyMultibase)
+    assert.strictEqual(normalizeKey(p256).curve, 'p256')
 })
