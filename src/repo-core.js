@@ -233,6 +233,109 @@ export class Repo {
   }
 
   /**
+   * Apply multiple create/update/delete writes in one MST transaction and
+   * produce a single signed commit v3.
+   *
+   * Unlike `applyWrite`, this is strict about existence: `create` of an
+   * existing key and `update`/`delete` of a missing key throw. Callers that
+   * want create-or-update semantics (like `putRecord`) must decide the action
+   * before calling.
+   *
+   * @param {Array<{action: 'create'|'update'|'delete', collection: string,
+   *   rkey: string, record?: object}>} writes
+   * @param {(encoded: Uint8Array) => Promise<string>} [signFn]
+   * @returns {Promise<{results: Array<{recordCid: string|null,
+   *   collection: string, rkey: string, action: string}>,
+   *   mstRoot: string, prevMstRoot: string|null, commit: object,
+   *   commitCid: string, rev: string,
+   *   newBlocks: Map<string, Uint8Array>}>}
+   */
+  async applyWrites(writes = [], signFn) {
+    if (!Array.isArray(writes) || writes.length === 0) {
+      throw new Error('applyWrites requires a non-empty array of writes')
+    }
+
+    let mst = this.mst || (await MST.create(this.blockstore, [], 0))
+    const prevMstRoot = this.mst ? await this.mst.getPointer() : null
+    const newBlocks = new Map()
+    const results = []
+
+    for (const write of writes) {
+      const { action, collection, rkey, record } = write || {}
+      if (!['create', 'update', 'delete'].includes(action)) {
+        throw new Error(`Unsupported write action: ${action}`)
+      }
+      if (typeof collection !== 'string' || typeof rkey !== 'string') {
+        throw new Error('applyWrites requires collection and rkey strings')
+      }
+      const key = `${collection}/${rkey}`
+      if (!isValidMstKey(key)) throw new Error(`Invalid MST key: ${key}`)
+      if (action !== 'delete' && (record === undefined || record === null)) {
+        throw new Error(`applyWrites ${action} requires a record`)
+      }
+
+      const existing = await mst.get(key)
+      if (action === 'create' && existing) {
+        throw new Error(`There is already a value at key: ${key}`)
+      }
+      if ((action === 'update' || action === 'delete') && !existing) {
+        throw new Error(`Could not find a record with key: ${key}`)
+      }
+
+      const recCid = action === 'delete' ? null : await recordCid(record)
+
+      if (action === 'delete') {
+        mst = await mst.delete(key)
+      } else if (action === 'update') {
+        mst = await mst.update(key, recCid)
+      } else {
+        mst = await mst.add(key, recCid)
+      }
+
+      // Include record blocks that are new to this blockstore (or to this
+      // batch). The MST only stores leaf CIDs, so these must be carried
+      // explicitly in the incremental CAR.
+      if (recCid && !this.blockstore.has(recCid) && !newBlocks.has(recCid)) {
+        newBlocks.set(recCid, cborEncode(record))
+      }
+
+      results.push({ recordCid: recCid, collection, rkey, action })
+    }
+
+    const { root: mstRoot, blocks } = await mst.getUnstoredBlocks()
+    for (const [cid, bytes] of blocks) newBlocks.set(cid, bytes)
+
+    const rev = nextTID(this.rev)
+    const unsigned = buildUnsignedCommit(this.did, mstRoot, rev, this.commitCid)
+
+    const sign = signFn || ((encoded) => {
+      if (!this.signingKey) throw new Error('No signFn or signingKey provided')
+      return signP256(this.signingKey, encoded)
+    })
+    const commit = await signCommit(unsigned, sign)
+    const cid = await commitCid(commit)
+
+    // The commit block is always part of this write's CAR.
+    newBlocks.set(cid, commitToCbor(commit))
+
+    // Commit state only after signing succeeded.
+    for (const [bcid, bytes] of newBlocks) this.blockstore.set(bcid, bytes)
+    this.mst = mst
+    this.commitCid = cid
+    this.rev = rev
+
+    return {
+      results,
+      mstRoot,
+      prevMstRoot,
+      commit,
+      commitCid: cid,
+      rev,
+      newBlocks,
+    }
+  }
+
+  /**
    * Build the incremental CAR for one `applyWrite` result: root = new commit,
    * blocks = new commit + new MST nodes + new record. This is the payload for
    * a firehose-style `#commit` event / append endpoint.

@@ -306,29 +306,47 @@ export class Journal {
         this.byUri = new Map()
 
         for (const event of this.events) {
-            const key = `${event.did}/${event.collection}/${event.rkey}`
-            const colKey = `${event.did}/${event.collection}`
+            // A batch commit (applyWrites) carries multiple ops in `writes`;
+            // expand it so getRecord/listRecords see every record, not just
+            // the first op in the ledger row.
+            const ops = Array.isArray(event.writes) && event.writes.length
+                ? event.writes
+                : [{ op: event.op, collection: event.collection, rkey: event.rkey, record: event.record, recordCid: event.recordCid }]
 
-            if (event.op === 'delete') {
-                this.byUri.delete(key)
-                // Remove from collection
-                const col = this.byCollection.get(colKey)
-                if (col) {
-                    const idx = col.findIndex(e => e.rkey === event.rkey)
-                    if (idx >= 0) col.splice(idx, 1)
+            for (const op of ops) {
+                if (!op || !op.collection || !op.rkey) continue
+                const isFirst = op.collection === event.collection && op.rkey === event.rkey
+                const view = {
+                    ...event,
+                    op: op.op,
+                    collection: op.collection,
+                    rkey: op.rkey,
+                    record: op.record !== undefined ? op.record : (isFirst ? event.record : undefined),
+                    recordCid: op.recordCid !== undefined ? op.recordCid : (isFirst ? event.recordCid : null)
                 }
-            } else {
-                this.byUri.set(key, event)
+                const key = `${view.did}/${view.collection}/${view.rkey}`
+                const colKey = `${view.did}/${view.collection}`
 
-                if (!this.byCollection.has(colKey)) {
-                    this.byCollection.set(colKey, [])
-                }
-                const col = this.byCollection.get(colKey)
-                const idx = col.findIndex(e => e.rkey === event.rkey)
-                if (idx >= 0) {
-                    col[idx] = event
+                if (view.op === 'delete') {
+                    this.byUri.delete(key)
+                    const col = this.byCollection.get(colKey)
+                    if (col) {
+                        const idx = col.findIndex(e => e.rkey === view.rkey)
+                        if (idx >= 0) col.splice(idx, 1)
+                    }
                 } else {
-                    col.push(event)
+                    this.byUri.set(key, view)
+
+                    if (!this.byCollection.has(colKey)) {
+                        this.byCollection.set(colKey, [])
+                    }
+                    const col = this.byCollection.get(colKey)
+                    const idx = col.findIndex(e => e.rkey === view.rkey)
+                    if (idx >= 0) {
+                        col[idx] = view
+                    } else {
+                        col.push(view)
+                    }
                 }
             }
         }

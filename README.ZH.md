@@ -11,6 +11,60 @@ AT Protocol 发布器 / 轻量 PDS，运行在 Cloudflare Workers 上。历史�
 - 决策：`docs/ADR/040.arch.owner-signed-p256-repo.md`；完整设计：`docs/phase6.md`。
 - 规则：**ledger 上线后，运行时写入走 append；静态 journal 只做 seed/备份**。官方 bsky.app 仍需要完整 PDS 写路径（M3）。
 
+## M3（可选）：官方 bsky.app 客户端兼容
+
+M1 的 owner-signed 账号不能登录官方客户端（标准写端点收记录，不收预签名 commit）。M3 增加第二种 **worker-signed** 模式：Worker 持 repo key、服务端签名，官方客户端可用。每账号一个 mode，互斥：
+
+- `owner-signed`（M1）：私钥在 owner 浏览器/CLI；`appendEvent`；官方客户端不可用。
+- `worker-signed`（M3）：私钥在 Worker（P-256，当前存 DO）；标准 `createRecord/applyWrites/uploadBlob`；官方客户端可用；owner 通过 did.json/轮换撤销。
+
+### 1. 配置 secret（生产）
+
+```bash
+npx wrangler secret put JWT_SECRET
+npx wrangler secret put BOOTSTRAP_TOKEN
+```
+
+本地开发：`cp .dev.vars.example .dev.vars`。
+
+### 2. Bootstrap 一个 worker-signed 账号
+
+```bash
+curl -X POST https://<你的-worker>/xrpc/com.atproto.worker.bootstrapAccount \
+  -H "Authorization: Bearer $BOOTSTRAP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"did":"did:web:you.example","handle":"you.example","password":"a-strong-password","pdsEndpoint":"https://<你的-worker>"}'
+```
+
+返回 `{ did, handle, publicKeyMultibase, didDoc }`；把 `didDoc` 发布到 `https://you.example/.well-known/did.json`。`bootstrapAccount` 幂等，默认不重置密码。
+
+### 3. 登录 / 写
+
+```bash
+curl -X POST https://<你的-worker>/xrpc/com.atproto.server.createSession \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier":"you.example","password":"a-strong-password"}'
+# -> accessJwt / refreshJwt
+
+curl -X POST https://<你的-worker>/xrpc/com.atproto.repo.createRecord \
+  -H "Authorization: Bearer $ACCESS_JWT" -H 'Content-Type: application/json' \
+  -d '{"repo":"did:web:you.example","collection":"app.bsky.feed.post","record":{"$type":"app.bsky.feed.post","text":"hello","createdAt":"..."}}'
+```
+
+### 4. Blobs（头像/图片）
+
+`com.atproto.repo.uploadBlob`（5 MB 上限）→ 返回 blob ref；`getBlob`/`listBlobs` 可读。生产建议启用 R2：
+
+```toml
+[[r2_buckets]]
+binding = "BLOBS"
+bucket_name = "atproto-blobs"
+```
+
+没有 R2 时用 DO SQLite 小文件 fallback（2 MB 行上限）。
+
+> M3 第一刀只做单账号 worker-signed；现有主账号仍是 M1 owner-signed。要切换主账号，需要显式 mode 迁移 + did.json 换钥（phase7 §5）。完整设计与后续计划见 `docs/phase7.md` / `docs/ADR/041`。
+
 ## 架构
 
 ```
@@ -146,6 +200,12 @@ curl https://你的-worker.子域名.workers.dev/refresh
 | `/xrpc/com.atproto.identity.resolveHandle` | Handle 解析为 DID |
 | `/xrpc/com.atproto.worker.appendEvent` | **owner 签名写入**（P-256 验签 + head CAS） |
 | `/xrpc/com.atproto.worker.snapshot` | 导出活账本 NDJSON（`?after=&limit=`） |
+| `/xrpc/com.atproto.worker.bootstrapAccount` | M3 owner-only：创建 worker-signed 账号 + repo key（`BOOTSTRAP_TOKEN`） |
+| `/xrpc/com.atproto.worker.accountDidDoc` | 返回某账号应发布的 did.json |
+| `/xrpc/com.atproto.server.createSession` / `getSession` / `refreshSession` / `deleteSession` | M3 会话 |
+| `/xrpc/com.atproto.repo.createRecord` / `putRecord` / `deleteRecord` / `applyWrites` | M3 服务端签名写端点 |
+| `/xrpc/com.atproto.repo.uploadBlob` | M3 blob 上传（5 MB；R2 或 DO fallback） |
+| `/xrpc/com.atproto.sync.listBlobs` | M3 列出 blob CID |
 | `/xrpc/_health` | 健康检查 |
 | `/refresh` | seed/刷新并广播 + `requestCrawl` |
 | `/journal.ndjson` | 静态 seed/备份（fresh deploy 时导入活账本） |

@@ -7,6 +7,9 @@ import { resolveHandle, generateDidWebDocument } from './did.js'
 import { resolveIdentity, handleFromDid } from './identity.js'
 import { createCarFile, cborEncode, cborDecode, cidToBytes, encodeVarint, base32Encode, base64ToBytes, isValidCidString } from './shared.js'
 import { validateAppendEvent, AppendValidationError, MAX_APPEND_BODY_BYTES } from './append.js'
+import { handleAuthXrpc, getAccount } from './auth.js'
+import { handleRepoWriteXrpc } from './writes.js'
+import { handleUploadBlob, getBlobBytes, listBlobCids } from './blobs.js'
 
 function xrpcError(status, error, message, details = null) {
     const body = { error, message }
@@ -40,6 +43,21 @@ function cachedJson(data, maxAge = 60) {
  */
 function eventsForDid(journal, did) {
     return journal.events.filter(e => e.did === did)
+}
+
+/**
+ * Hosted = has a ledger event, OR exists as an M3 account. A freshly
+ * bootstrapped worker-signed account has blobs/session before its first
+ * record, so blob reads must consult the accounts table too.
+ */
+async function isHosted(env, hosted, did) {
+    if (hosted.has(did)) return true
+    try {
+        const account = await getAccount(env, { did })
+        return !!account && (account.active === undefined || account.active === 1 || account.active === true)
+    } catch {
+        return false
+    }
 }
 
 /**
@@ -87,21 +105,34 @@ export async function handleXrpc(request, { journal, did, handle, env, hosted, o
         case 'com.atproto.sync.getBlob':
             return handleGetBlob(url, journal, hostedSet, env, ownHost)
 
+        case 'com.atproto.sync.listBlobs':
+            return handleListBlobs(url, journal, hostedSet, env)
+
+        case 'com.atproto.repo.uploadBlob':
+            return handleUploadBlob(request, env, ctx)
+
         case 'com.atproto.repo.describeRepo':
             return handleDescribeRepo(url, journal, handle, did, env, hostedSet, ownHost)
 
         case 'com.atproto.worker.snapshot':
             return handleSnapshot(request, env, journal)
 
-        case '_health':
-            return handleHealth(journal)
+        case 'com.atproto.server.createSession':
+        case 'com.atproto.server.getSession':
+        case 'com.atproto.server.refreshSession':
+        case 'com.atproto.server.deleteSession':
+        case 'com.atproto.worker.bootstrapAccount':
+        case 'com.atproto.worker.accountDidDoc':
+            return handleAuthXrpc(request, method, env, ctx)
 
-        // Write operations not supported (use CLI)
         case 'com.atproto.repo.createRecord':
         case 'com.atproto.repo.putRecord':
         case 'com.atproto.repo.deleteRecord':
-            return xrpcError(501, 'MethodNotImplemented',
-                'Write operations not supported. Use the local CLI to add records.')
+        case 'com.atproto.repo.applyWrites':
+            return handleRepoWriteXrpc(request, method, env, ctx, { journal, ownHost })
+
+        case '_health':
+            return handleHealth(journal)
 
         default:
             return xrpcError(501, 'MethodNotImplemented', `Method ${method} is not implemented`)
@@ -719,33 +750,70 @@ async function handleGetBlob(url, journal, hosted, env, ownHost) {
     const did = url.searchParams.get('did')
     const cid = url.searchParams.get('cid')
 
-    if (!hosted.has(did) || !isValidCidString(cid)) {
-        return xrpcError(404, 'BlobNotFound', 'Blob not found')
-    }
-    if (!env.ASSETS) {
+    if (!isValidCidString(cid) || !(await isHosted(env, hosted, did))) {
         return xrpcError(404, 'BlobNotFound', 'Blob not found')
     }
 
-    // The main did:web account keeps blobs at uploads/ root (backward
-    // compatible); publishing accounts use uploads/<handle>/ (derived from
-    // the did — no registry needed).
-    const handle = handleFromDid(did)
-    const prefix = handle && handle !== ownHost ? `uploads/${handle}/` : 'uploads/'
+    // Static ASSETS blobs (M1/CLI-published) keep their historical layout:
+    // main did:web at uploads/ root; publishing accounts at uploads/<handle>/.
+    if (env.ASSETS) {
+        const handle = handleFromDid(did)
+        const prefix = handle && handle !== ownHost ? `uploads/${handle}/` : 'uploads/'
 
-    for (const [ext, mime] of BLOB_CANDIDATES) {
-        const resp = await env.ASSETS.fetch(`https://worker/${prefix}${cid}.${ext}`)
-        if (resp.ok) {
-            return new Response(resp.body, {
-                status: 200,
-                headers: {
-                    'Content-Type': mime,
-                    'Cache-Control': 'public, max-age=86400'
-                }
-            })
+        for (const [ext, mime] of BLOB_CANDIDATES) {
+            const resp = await env.ASSETS.fetch(`https://worker/${prefix}${cid}.${ext}`)
+            if (resp.ok) {
+                return new Response(resp.body, {
+                    status: 200,
+                    headers: {
+                        'Content-Type': mime,
+                        'Cache-Control': 'public, max-age=86400'
+                    }
+                })
+            }
         }
     }
 
+    // Mutable M3 blob store: R2 (env.BLOBS) or the Firehose DO fallback.
+    const blob = await getBlobBytes(env, cid, { did })
+    if (blob) {
+        return new Response(blob.bytes, {
+            status: 200,
+            headers: {
+                'Content-Type': blob.mimeType || 'application/octet-stream',
+                'Content-Length': String(blob.size ?? blob.bytes.length),
+                'Cache-Control': 'public, max-age=86400'
+            }
+        })
+    }
+
     return xrpcError(404, 'BlobNotFound', 'Blob not found')
+}
+
+/**
+ * com.atproto.sync.listBlobs - list blob CIDs for a DID.
+ * The store returns metadata; pagination is by CID (opaque cursor).
+ */
+async function handleListBlobs(url, journal, hosted, env) {
+    const did = url.searchParams.get('did')
+    if (!(await isHosted(env, hosted, did))) {
+        return xrpcError(404, 'RepoNotFound', 'Repo not found')
+    }
+
+    const cursor = url.searchParams.get('cursor')
+    const rawLimit = parseInt(url.searchParams.get('limit') || '500', 10)
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(1000, rawLimit)) : 500
+
+    const all = (await listBlobCids(env, did)).map(b => b.cid).sort()
+    const start = cursor ? all.findIndex(cid => cid > cursor) : 0
+    const from = start < 0 ? all.length : start
+    const cids = all.slice(from, from + limit)
+    const hasMore = from + limit < all.length
+
+    return xrpcSuccess({
+        cids,
+        ...(hasMore ? { cursor: cids[cids.length - 1] } : {})
+    })
 }
 
 /**

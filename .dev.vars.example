@@ -1,0 +1,4 @@
+# Local development only. Copy to .dev.vars (gitignored).
+# Production: npx wrangler secret put JWT_SECRET / BOOTSTRAP_TOKEN
+JWT_SECRET=change-me-to-a-long-random-string
+BOOTSTRAP_TOKEN=change-me-to-another-long-random-string

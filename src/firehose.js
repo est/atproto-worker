@@ -31,6 +31,9 @@ export const MAX_GLOBAL_CONNECTS_PER_WINDOW = 15
 export const MAX_CONCURRENT_SOCKETS = 8
 export const MAX_SOCKETS_PER_IP = 2
 
+// SQLite fallback blob cap (base64 row value). Larger blobs require R2.
+const DO_BLOB_BASE64_LIMIT = 2 * 1024 * 1024
+
 /**
  * Sliding-window connect limiter decision. `recentAttempts` are timestamps
  * of prior attempts from the same client; returns whether a new attempt is
@@ -130,6 +133,61 @@ export class Firehose {
         if (!hasMstRoot) sql.exec('ALTER TABLE heads ADD COLUMN mst_root TEXT')
         sql.exec('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)')
         sql.exec("INSERT OR IGNORE INTO meta(k, v) VALUES('schema_version', '2')")
+
+        // M3 auth/account layer. Events/heads are unchanged; these tables are
+        // additive so an existing v2 ledger keeps working.
+        sql.exec(`
+            CREATE TABLE IF NOT EXISTS accounts (
+                did                 TEXT PRIMARY KEY,
+                handle              TEXT UNIQUE NOT NULL,
+                mode                TEXT NOT NULL DEFAULT 'worker-signed',
+                password_hash       TEXT,
+                password_salt       TEXT,
+                password_iterations INTEGER,
+                repo_key_id         TEXT,
+                active              INTEGER DEFAULT 1,
+                created_at          TEXT
+            )
+        `)
+        sql.exec(`
+            CREATE TABLE IF NOT EXISTS repo_keys (
+                id                   TEXT PRIMARY KEY,
+                did                  TEXT NOT NULL,
+                curve                TEXT NOT NULL,
+                public_key_multibase TEXT NOT NULL,
+                private_key_pkcs8    TEXT NOT NULL,
+                created_at           TEXT,
+                retired_at           TEXT
+            )
+        `)
+        sql.exec('CREATE INDEX IF NOT EXISTS idx_repo_keys_did_active ON repo_keys(did, retired_at)')
+        sql.exec(`
+            CREATE TABLE IF NOT EXISTS sessions (
+                jti                TEXT PRIMARY KEY,
+                did                TEXT NOT NULL,
+                refresh_hash       TEXT NOT NULL,
+                access_expires_at  TEXT,
+                refresh_expires_at TEXT,
+                revoked_at         TEXT,
+                created_at         TEXT
+            )
+        `)
+        sql.exec('CREATE INDEX IF NOT EXISTS idx_sessions_did ON sessions(did)')
+
+        // M3 blob fallback. R2 (`env.BLOBS`) is preferred in production; this
+        // table keeps small blobs (and local/dev uploads) working with zero
+        // extra bindings. `data_b64` caps the stored payload at ~1.5 MB raw.
+        sql.exec(`
+            CREATE TABLE IF NOT EXISTS blobs (
+                cid        TEXT PRIMARY KEY,
+                did        TEXT NOT NULL,
+                mime_type  TEXT,
+                size       INTEGER,
+                data_b64   TEXT NOT NULL,
+                created_at TEXT
+            )
+        `)
+        sql.exec('CREATE INDEX IF NOT EXISTS idx_blobs_did ON blobs(did)')
     }
 
     jsonResponse(data, status = 200) {
@@ -146,6 +204,397 @@ export class Firehose {
     one(sql, query, ...bindings) {
         const rows = sql.exec(query, ...bindings).toArray()
         return rows.length > 0 ? rows[0] : null
+    }
+
+    // ============ M3 account/session/repo-key routes ============
+
+    accountRowToJson(row) {
+        if (!row) return null
+        return {
+            did: row.did,
+            handle: row.handle,
+            mode: row.mode,
+            passwordHash: row.password_hash ?? null,
+            passwordSalt: row.password_salt ?? null,
+            passwordIterations: row.password_iterations ?? null,
+            repoKeyId: row.repo_key_id ?? null,
+            active: row.active === 1 || row.active === true,
+            createdAt: row.created_at ?? null
+        }
+    }
+
+    repoKeyRowToJson(row) {
+        if (!row) return null
+        return {
+            id: row.id,
+            did: row.did,
+            curve: row.curve,
+            publicKeyMultibase: row.public_key_multibase,
+            privateKeyPkcs8: row.private_key_pkcs8,
+            createdAt: row.created_at ?? null,
+            retiredAt: row.retired_at ?? null
+        }
+    }
+
+    sessionRowToJson(row) {
+        if (!row) return null
+        return {
+            jti: row.jti,
+            did: row.did,
+            refreshHash: row.refresh_hash,
+            accessExpiresAt: row.access_expires_at ?? null,
+            refreshExpiresAt: row.refresh_expires_at ?? null,
+            revokedAt: row.revoked_at ?? null,
+            createdAt: row.created_at ?? null
+        }
+    }
+
+    /**
+     * POST /account  {account} -> upsert by did (unique handle enforced)
+     * GET  /account?did= | ?handle=
+     */
+    async handleAccountRoute(request, url, sql) {
+        if (!sql) return this.jsonResponse({ error: 'LedgerUnavailable', message: 'SQLite storage unavailable' }, 503)
+
+        if (request.method === 'POST') {
+            let body
+            try {
+                body = await request.json()
+            } catch {
+                return this.jsonResponse({ error: 'InvalidRequest', message: 'Request body must be valid JSON' }, 400)
+            }
+            const account = body?.account
+            if (!account || typeof account.did !== 'string' || !account.did ||
+                typeof account.handle !== 'string' || !account.handle) {
+                return this.jsonResponse({ error: 'InvalidRequest', message: 'account.did and account.handle are required' }, 400)
+            }
+
+            const byHandle = this.one(sql, 'SELECT did FROM accounts WHERE handle = ?', account.handle)
+            if (byHandle && byHandle.did !== account.did) {
+                return this.jsonResponse({ error: 'AccountConflict', message: 'handle is already bound to another did' }, 409)
+            }
+
+            const active = account.active === false || account.active === 0 ? 0 : 1
+            sql.exec(
+                `INSERT INTO accounts(did, handle, mode, password_hash, password_salt, password_iterations, repo_key_id, active, created_at)
+                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(did) DO UPDATE SET
+                   handle = excluded.handle,
+                   mode = excluded.mode,
+                   password_hash = excluded.password_hash,
+                   password_salt = excluded.password_salt,
+                   password_iterations = excluded.password_iterations,
+                   repo_key_id = excluded.repo_key_id,
+                   active = excluded.active`,
+                account.did,
+                account.handle,
+                account.mode || 'worker-signed',
+                account.passwordHash ?? null,
+                account.passwordSalt ?? null,
+                account.passwordIterations ?? null,
+                account.repoKeyId ?? null,
+                active,
+                account.createdAt || new Date().toISOString()
+            )
+
+            const row = this.one(sql, 'SELECT * FROM accounts WHERE did = ?', account.did)
+            return this.jsonResponse({ ok: true, account: this.accountRowToJson(row) })
+        }
+
+        if (request.method === 'GET') {
+            const did = url.searchParams.get('did')
+            const handle = url.searchParams.get('handle')
+            if (!did && !handle) {
+                return this.jsonResponse({ error: 'InvalidRequest', message: 'did or handle is required' }, 400)
+            }
+            const row = did
+                ? this.one(sql, 'SELECT * FROM accounts WHERE did = ?', did)
+                : this.one(sql, 'SELECT * FROM accounts WHERE handle = ?', handle)
+            if (!row) return new Response('Not Found', { status: 404 })
+            return this.jsonResponse({ account: this.accountRowToJson(row) })
+        }
+
+        return new Response('Method Not Allowed', { status: 405 })
+    }
+
+    /**
+     * POST /repo-key {key} -> insert
+     * GET  /repo-key?did= -> active (retired_at IS NULL) key
+     */
+    async handleRepoKeyRoute(request, url, sql) {
+        if (!sql) return this.jsonResponse({ error: 'LedgerUnavailable', message: 'SQLite storage unavailable' }, 503)
+
+        if (request.method === 'POST') {
+            let body
+            try {
+                body = await request.json()
+            } catch {
+                return this.jsonResponse({ error: 'InvalidRequest', message: 'Request body must be valid JSON' }, 400)
+            }
+            const key = body?.key
+            if (!key || typeof key.id !== 'string' || !key.id ||
+                typeof key.did !== 'string' || !key.did ||
+                typeof key.curve !== 'string' || !key.curve ||
+                typeof key.publicKeyMultibase !== 'string' || !key.publicKeyMultibase ||
+                typeof key.privateKeyPkcs8 !== 'string' || !key.privateKeyPkcs8) {
+                return this.jsonResponse({
+                    error: 'InvalidRequest',
+                    message: 'key.id, key.did, key.curve, key.publicKeyMultibase and key.privateKeyPkcs8 are required'
+                }, 400)
+            }
+
+            try {
+                sql.exec(
+                    `INSERT INTO repo_keys(id, did, curve, public_key_multibase, private_key_pkcs8, created_at, retired_at)
+                     VALUES(?, ?, ?, ?, ?, ?, ?)`,
+                    key.id,
+                    key.did,
+                    key.curve,
+                    key.publicKeyMultibase,
+                    key.privateKeyPkcs8,
+                    key.createdAt || new Date().toISOString(),
+                    key.retiredAt ?? null
+                )
+            } catch {
+                return this.jsonResponse({ error: 'RepoKeyConflict', message: 'Repo key id already exists' }, 409)
+            }
+
+            const row = this.one(sql, 'SELECT * FROM repo_keys WHERE id = ?', key.id)
+            return this.jsonResponse({ ok: true, key: this.repoKeyRowToJson(row) })
+        }
+
+        if (request.method === 'GET') {
+            const did = url.searchParams.get('did')
+            if (!did) {
+                return this.jsonResponse({ error: 'InvalidRequest', message: 'did is required' }, 400)
+            }
+            const row = this.one(
+                sql,
+                `SELECT * FROM repo_keys
+                 WHERE did = ? AND retired_at IS NULL
+                 ORDER BY created_at DESC
+                 LIMIT 1`,
+                did
+            )
+            if (!row) return new Response('Not Found', { status: 404 })
+            return this.jsonResponse({ key: this.repoKeyRowToJson(row) })
+        }
+
+        return new Response('Method Not Allowed', { status: 405 })
+    }
+
+    /**
+     * POST /session {session} -> insert
+     * GET  /session?jti=
+     */
+    async handleSessionRoute(request, url, sql) {
+        if (!sql) return this.jsonResponse({ error: 'LedgerUnavailable', message: 'SQLite storage unavailable' }, 503)
+
+        if (request.method === 'POST') {
+            let body
+            try {
+                body = await request.json()
+            } catch {
+                return this.jsonResponse({ error: 'InvalidRequest', message: 'Request body must be valid JSON' }, 400)
+            }
+            const session = body?.session
+            if (!session || typeof session.jti !== 'string' || !session.jti ||
+                typeof session.did !== 'string' || !session.did ||
+                typeof session.refreshHash !== 'string' || !session.refreshHash) {
+                return this.jsonResponse({
+                    error: 'InvalidRequest',
+                    message: 'session.jti, session.did and session.refreshHash are required'
+                }, 400)
+            }
+
+            try {
+                sql.exec(
+                    `INSERT INTO sessions(jti, did, refresh_hash, access_expires_at, refresh_expires_at, revoked_at, created_at)
+                     VALUES(?, ?, ?, ?, ?, ?, ?)`,
+                    session.jti,
+                    session.did,
+                    session.refreshHash,
+                    session.accessExpiresAt ?? null,
+                    session.refreshExpiresAt ?? null,
+                    session.revokedAt ?? null,
+                    session.createdAt || new Date().toISOString()
+                )
+            } catch {
+                return this.jsonResponse({ error: 'SessionConflict', message: 'Session already exists' }, 409)
+            }
+
+            const row = this.one(sql, 'SELECT * FROM sessions WHERE jti = ?', session.jti)
+            return this.jsonResponse({ ok: true, session: this.sessionRowToJson(row) })
+        }
+
+        if (request.method === 'GET') {
+            const jti = url.searchParams.get('jti')
+            if (!jti) {
+                return this.jsonResponse({ error: 'InvalidRequest', message: 'jti is required' }, 400)
+            }
+            const row = this.one(sql, 'SELECT * FROM sessions WHERE jti = ?', jti)
+            if (!row) return new Response('Not Found', { status: 404 })
+            return this.jsonResponse({ session: this.sessionRowToJson(row) })
+        }
+
+        return new Response('Method Not Allowed', { status: 405 })
+    }
+
+    /** POST /session/revoke {jti, revokedAt} */
+    async handleSessionRevoke(request, sql) {
+        if (!sql) return this.jsonResponse({ error: 'LedgerUnavailable', message: 'SQLite storage unavailable' }, 503)
+
+        let body
+        try {
+            body = await request.json()
+        } catch {
+            return this.jsonResponse({ error: 'InvalidRequest', message: 'Request body must be valid JSON' }, 400)
+        }
+        const jti = body?.jti
+        if (typeof jti !== 'string' || !jti) {
+            return this.jsonResponse({ error: 'InvalidRequest', message: 'jti is required' }, 400)
+        }
+
+        const existing = this.one(sql, 'SELECT jti FROM sessions WHERE jti = ?', jti)
+        if (!existing) return new Response('Not Found', { status: 404 })
+
+        const revokedAt = body.revokedAt || new Date().toISOString()
+        sql.exec('UPDATE sessions SET revoked_at = ? WHERE jti = ?', revokedAt, jti)
+
+        const row = this.one(sql, 'SELECT * FROM sessions WHERE jti = ?', jti)
+        return this.jsonResponse({ ok: true, session: this.sessionRowToJson(row) })
+    }
+
+    // ============ M3 blob fallback routes ============
+
+    blobRowToJson(row) {
+        if (!row) return null
+        return {
+            cid: row.cid,
+            did: row.did,
+            mimeType: row.mime_type ?? null,
+            size: row.size ?? null,
+            dataB64: row.data_b64,
+            createdAt: row.created_at ?? null
+        }
+    }
+
+    /**
+     * POST /blob {cid, did, mimeType, size, dataB64} -> insert (idempotent)
+     * GET  /blob?cid=  -> {cid, did, mimeType, size, dataB64}
+     * HEAD /blob?cid=  -> 200 / 404
+     *
+     * The 2 MB base64 cap is enforced here as well as in src/blobs.js, so a
+     * direct/in-process caller cannot wedge a huge row into SQLite.
+     */
+    async handleBlobRoute(request, url, sql) {
+        if (!sql) return this.jsonResponse({ error: 'LedgerUnavailable', message: 'SQLite storage unavailable' }, 503)
+
+        if (request.method === 'POST') {
+            let body
+            try {
+                body = await request.json()
+            } catch {
+                return this.jsonResponse({ error: 'InvalidRequest', message: 'Request body must be valid JSON' }, 400)
+            }
+
+            const { cid, did, mimeType, size, dataB64 } = body || {}
+            if (typeof cid !== 'string' || !cid ||
+                typeof did !== 'string' || !did ||
+                typeof dataB64 !== 'string' || !dataB64) {
+                return this.jsonResponse({
+                    error: 'InvalidRequest',
+                    message: 'cid, did and dataB64 are required'
+                }, 400)
+            }
+            if (dataB64.length > DO_BLOB_BASE64_LIMIT) {
+                return this.jsonResponse({
+                    error: 'BlobTooLarge',
+                    message: 'Blob is too large for the built-in SQLite store; configure the optional R2 binding (BLOBS)'
+                }, 413)
+            }
+
+            // Blobs are content-addressed, so a duplicate CID is the same
+            // bytes: return ok without rewriting the row.
+            const existing = this.one(sql, 'SELECT cid FROM blobs WHERE cid = ?', cid)
+            if (existing) {
+                return this.jsonResponse({ ok: true, existing: true, blob: { cid, did, mimeType: mimeType ?? null, size: size ?? null } })
+            }
+
+            const storedSize = Number.isInteger(size) ? size : null
+            try {
+                sql.exec(
+                    `INSERT INTO blobs(cid, did, mime_type, size, data_b64, created_at)
+                     VALUES(?, ?, ?, ?, ?, ?)`,
+                    cid,
+                    did,
+                    mimeType ?? null,
+                    storedSize,
+                    dataB64,
+                    body.createdAt || new Date().toISOString()
+                )
+            } catch {
+                // A concurrent insert of the same cid is fine.
+                const raced = this.one(sql, 'SELECT cid FROM blobs WHERE cid = ?', cid)
+                if (raced) {
+                    return this.jsonResponse({ ok: true, existing: true, blob: { cid, did, mimeType: mimeType ?? null, size: storedSize } })
+                }
+                throw new Error('Failed to store blob')
+            }
+
+            const row = this.one(sql, 'SELECT cid, did, mime_type, size, created_at FROM blobs WHERE cid = ?', cid)
+            return this.jsonResponse({
+                ok: true,
+                blob: {
+                    cid: row.cid,
+                    did: row.did,
+                    mimeType: row.mime_type ?? null,
+                    size: row.size ?? null,
+                    createdAt: row.created_at ?? null
+                }
+            })
+        }
+
+        if (request.method === 'GET' || request.method === 'HEAD') {
+            const cid = url.searchParams.get('cid')
+            if (!cid) {
+                return this.jsonResponse({ error: 'InvalidRequest', message: 'cid is required' }, 400)
+            }
+
+            const row = this.one(sql, 'SELECT * FROM blobs WHERE cid = ?', cid)
+            if (!row) return new Response('Not Found', { status: 404 })
+
+            if (request.method === 'HEAD') {
+                return new Response(null, {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' }
+                })
+            }
+            return this.jsonResponse(this.blobRowToJson(row))
+        }
+
+        return new Response('Method Not Allowed', { status: 405 })
+    }
+
+    /** GET /blobs?did= -> [{cid, mimeType, size}] (listBlobs metadata). */
+    async handleBlobsListRoute(url, sql) {
+        if (!sql) return this.jsonResponse({ error: 'LedgerUnavailable', message: 'SQLite storage unavailable' }, 503)
+
+        const did = url.searchParams.get('did')
+        if (!did) {
+            return this.jsonResponse({ error: 'InvalidRequest', message: 'did is required' }, 400)
+        }
+
+        const rows = sql.exec(
+            'SELECT cid, mime_type, size FROM blobs WHERE did = ? ORDER BY created_at ASC',
+            did
+        ).toArray()
+
+        return this.jsonResponse(rows.map(row => ({
+            cid: row.cid,
+            mimeType: row.mime_type ?? null,
+            size: row.size ?? null
+        })))
     }
 
     /** Turn a stored row into the journal event object. */
@@ -270,6 +719,33 @@ export class Firehose {
             return new Response(JSON.stringify({ cursor }), {
                 headers: { 'Content-Type': 'application/json' }
             })
+        }
+
+        // M3 account/session/repo-key routes (internal; only the Worker calls
+        // these through the FIREHOSE binding).
+        if (url.pathname === '/account') {
+            return this.handleAccountRoute(request, url, sql)
+        }
+
+        if (url.pathname === '/repo-key') {
+            return this.handleRepoKeyRoute(request, url, sql)
+        }
+
+        if (url.pathname === '/session') {
+            return this.handleSessionRoute(request, url, sql)
+        }
+
+        if (url.pathname === '/session/revoke' && request.method === 'POST') {
+            return this.handleSessionRevoke(request, sql)
+        }
+
+        // M3 blob fallback (R2 is preferred by src/blobs.js when configured).
+        if (url.pathname === '/blob') {
+            return this.handleBlobRoute(request, url, sql)
+        }
+
+        if (url.pathname === '/blobs' && request.method === 'GET') {
+            return this.handleBlobsListRoute(url, sql)
         }
 
         return new Response('Not Found', { status: 404 })
@@ -773,6 +1249,24 @@ export class Firehose {
         // {$link: ...}), not plain strings — the relay's LexLink.UnmarshalCBOR
         // (cbg.ReadCid) fails on strings and drops the connection, which was
         // the source of its reconnect loop.
+        // applyWrites stores one ledger row with multiple ops in `writes`.
+        // Emit one firehose op per write so relay/appview see the whole batch.
+        const writeOps = Array.isArray(event.writes) && event.writes.length
+            ? event.writes
+            : [{
+                op: event.op,
+                collection: event.collection,
+                rkey: event.rkey,
+                recordCid: event.recordCid,
+                record: event.record
+            }]
+        const opsFor = (fallbackCid) => writeOps.map(w => ({
+            action: w.op,
+            path: `${w.collection}/${w.rkey}`,
+            cid: w.op === 'delete' ? null : { $link: w.recordCid || fallbackCid }
+        }))
+        const blobsFor = () => collectBlobRefs(writeOps.map(w => w.record).filter(Boolean))
+
         if (event.commitCid && event.blocksB64) {
             body = {
                 seq: event.offset,
@@ -785,12 +1279,8 @@ export class Firehose {
                 since: event.prevRev || null,
                 prevData: event.prevMstRoot ? { $link: event.prevMstRoot } : null,
                 blocks: base64ToBytes(event.blocksB64),
-                ops: [{
-                    action: event.op,
-                    path: `${event.collection}/${event.rkey}`,
-                    cid: event.op === 'delete' ? null : { $link: event.recordCid || event.commitCid }
-                }],
-                blobs: collectBlobRefs(event.record)
+                ops: opsFor(event.commitCid),
+                blobs: blobsFor()
             }
         } else {
             // Legacy fallback: empty CAR
@@ -804,12 +1294,8 @@ export class Firehose {
                 rev: event.rev,
                 since: event.prevRev || null,
                 blocks: createCarFile(event.cid, []),
-                ops: [{
-                    action: event.op,
-                    path: `${event.collection}/${event.rkey}`,
-                    cid: event.op === 'delete' ? null : { $link: event.cid }
-                }],
-                blobs: collectBlobRefs(event.record)
+                ops: opsFor(event.cid),
+                blobs: blobsFor()
             }
         }
 

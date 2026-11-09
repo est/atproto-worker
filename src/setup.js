@@ -109,6 +109,16 @@ export async function checkSetup(env, journal, host) {
         command: ''
     })
 
+    checks.push({
+        id: 'm3_auth',
+        phase: 3,
+        label: 'M3 官方客户端（可选，worker-signed）',
+        status: env.JWT_SECRET && env.BOOTSTRAP_TOKEN ? 'ok' : 'warn',
+        value: env.JWT_SECRET && env.BOOTSTRAP_TOKEN ? 'JWT/BOOTSTRAP secret 已配置' : '未配置（仅 M1 owner-signed 模式可用）',
+        hint: 'M3 用 Worker 持 repo key + 标准写端点，官方 bsky.app 可登录；主账号仍是 M1。',
+        command: 'npx wrangler secret put JWT_SECRET && npx wrangler secret put BOOTSTRAP_TOKEN'
+    })
+
     // Phase 3 — 可选：外部托管 journal（默认用随 Worker 部署的静态资产，无需设置）
     const journalUrl = env.JOURNAL_URL
     checks.push({

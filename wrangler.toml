@@ -45,6 +45,16 @@ new_sqlite_classes = ["Firehose"]
 # Note: PRIVATE_KEY is only used by the local CLI (cli/seal.js), not by the Worker.
 # It lives in config.json locally and must NEVER be committed or deployed as an env var.
 
+# M3 (optional, worker-signed accounts): set these as secrets, not vars:
+#   npx wrangler secret put JWT_SECRET
+#   npx wrangler secret put BOOTSTRAP_TOKEN
+# Local dev: cp .dev.vars.example .dev.vars
+#
+# Optional R2 for browser/client blob uploads (otherwise a small DO fallback):
+# [[r2_buckets]]
+# binding = "BLOBS"
+# bucket_name = "atproto-blobs"
+
 # Development overrides
 [env.dev.vars]
 # Local dev identity (dev-only, derived from "localhost" otherwise)

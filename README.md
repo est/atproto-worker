@@ -22,6 +22,29 @@ An AT Protocol publisher / lightweight PDS on Cloudflare Workers. Historically a
 
 > 一键部署会自动配置：Durable Object（firehose）、静态资产（journal）、定时任务、身份自动推导。私钥始终留在你本地，Worker 永不接触。
 
+## M3 (optional): official bsky.app client compatibility
+
+M1 owner-signed accounts cannot log into official clients (standard write endpoints take records, not pre-signed commits). M3 adds a second **worker-signed** mode: the Worker holds the repo key and signs server-side. One mode per account:
+
+- `owner-signed` (M1): key in the owner's browser/CLI; `appendEvent`; official clients unavailable.
+- `worker-signed` (M3): key in the Worker (P-256, currently DO storage); standard `createRecord/applyWrites/uploadBlob`; official clients work; the owner revokes via did.json/rotation.
+
+Setup:
+
+```bash
+npx wrangler secret put JWT_SECRET
+npx wrangler secret put BOOTSTRAP_TOKEN
+# local: cp .dev.vars.example .dev.vars
+
+curl -X POST https://<worker>/xrpc/com.atproto.worker.bootstrapAccount \
+  -H "Authorization: Bearer $BOOTSTRAP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"did":"did:web:you.example","handle":"you.example","password":"...","pdsEndpoint":"https://<worker>"}'
+# publish the returned didDoc at https://you.example/.well-known/did.json
+# then createSession + createRecord/applyWrites/uploadBlob with the returned JWTs
+```
+
+Blobs use R2 when `env.BLOBS` is bound, otherwise a DO SQLite fallback (small files). The first M3 slice is single-account worker-signed; the existing main account stays M1 owner-signed. See `docs/phase7.md` and `docs/ADR/041`.
+
 ## Architecture
 
 ```
@@ -158,6 +181,12 @@ shows the live status of every step.
 | `/xrpc/com.atproto.identity.resolveHandle` | Resolve handle to DID |
 | `/xrpc/com.atproto.worker.appendEvent` | **Owner-signed write** (P-256 verify + head CAS) |
 | `/xrpc/com.atproto.worker.snapshot` | Export the live ledger as NDJSON (`?after=&limit=`) |
+| `/xrpc/com.atproto.worker.bootstrapAccount` | M3 owner-only: create a worker-signed account + repo key (`BOOTSTRAP_TOKEN`) |
+| `/xrpc/com.atproto.worker.accountDidDoc` | Return the did.json an account should publish |
+| `/xrpc/com.atproto.server.createSession` / `getSession` / `refreshSession` / `deleteSession` | M3 sessions |
+| `/xrpc/com.atproto.repo.createRecord` / `putRecord` / `deleteRecord` / `applyWrites` | M3 server-signed writes |
+| `/xrpc/com.atproto.repo.uploadBlob` | M3 blob upload (5 MB; R2 or DO fallback) |
+| `/xrpc/com.atproto.sync.listBlobs` | M3 list blob CIDs |
 | `/xrpc/_health` | Health check |
 | `/refresh` | Seed/refresh, broadcast, and `requestCrawl` |
 | `/journal.ndjson` | Static seed/backup (imported into the ledger on a fresh deploy) |

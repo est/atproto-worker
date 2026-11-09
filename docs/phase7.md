@@ -185,6 +185,24 @@ M3 只需要在 Worker 侧：
 - **历史**：协议只验 head（M1 已验证），所以轮换不需要重签历史；但 relay 若从 -1 重放旧事件可能验签失败（已知边界）。
 - **协调**：发布新 did.json 与"用新 key 签一个新 head"要尽量同窗口完成，避免中间态。M3a 可以把 did.json 放外部托管，Worker 只负责 repo；owner 先改 did.json，再触发 Worker 用新 key re-sign head（或反过来，接受短暂窗口）。
 
+### 实施状态（2026-11-09 晚，M3 第一刀）
+
+已完成（单账号、P-256、worker-signed）：
+
+- **P1 sessions/JWT/password**：`src/auth.js`；PBKDF2-SHA256 210k；HS256 access/refresh JWT；`createSession/getSession/refreshSession/deleteSession`；refresh 轮换/撤销；`BOOTSTRAP_TOKEN` 保护的 `com.atproto.worker.bootstrapAccount`；`accountDidDoc`。
+- **P2 服务端 repo core + 标准写端点**：`src/writes.js`；`createRecord/putRecord/deleteRecord/applyWrites`；从 ledger 重建 repo（`loadRepoForDid`），用 Worker 持有的 P-256 repo key 签名，走 M1 的 DO `/append`；`swapCommit`/`swapRecord`；`applyWrites` 一次 commit、结果保序；批量事件在 Journal/firehose 里按 `writes` 展开（getRecord/listRecords/firehose ops 都覆盖多 op）。
+- **P3 blobs**：`src/blobs.js`；`uploadBlob`（5 MB 上限、raw-codec CID）+ `getBlob`/`listBlobs`；R2（`env.BLOBS`）优先，DO SQLite（2 MB 行上限）作为本地/小文件 fallback；新账号在首条记录前也能读自己的 blob（hosted = ledger ∪ accounts）。
+- **DO schema**：`accounts`/`repo_keys`/`sessions`/`blobs`（additive，schema_version 仍 2）。
+- **本地 workerd E2E**：`bootstrapAccount → createSession → createRecord → getRecord → getLatestCommit → refreshSession → deleteRecord → 404 → deleteSession`；以及 `uploadBlob → getBlob（字节一致）→ listBlobs`。
+- **测试**：`npm test` 140 个；`npm run test:ui` 2 个；全部通过。
+
+待办（P4/P5）：
+
+- **真实 bsky.app 登录/发帖 E2E**（最终验收；需要把 M3 账号的 did.json 发布到 did:web 并部署）。
+- 主账号仍是 M1 owner-signed；M3 目前用 bootstrap 出来的 worker-signed 账号。切换主账号需要显式 `mode` 迁移 + did.json 换钥。
+- 账号/密码管理（改密、禁用、公开注册）、per-DID 限流、session 撤销对 access token 的即时生效、R2 生产绑定、完整 lexicon 校验、`getBlocks`/`importRepo` 等可选端点。
+- 轮换/撤销演练（P5）：did.json 外部托管 + Worker repo key 轮换。
+
 ### 5.3 M1 与 M3 的共存
 
 - **每账号一个 mode**：`mode: 'owner-signed' | 'worker-signed'`。
